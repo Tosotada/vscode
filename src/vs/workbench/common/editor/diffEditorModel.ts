@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { TPromise } from 'vs/base/common/winjs.base';
 import { EditorModel } from 'vs/workbench/common/editor';
 import { IEditorModel } from 'vs/platform/editor/common/editor';
 
@@ -12,35 +11,31 @@ import { IEditorModel } from 'vs/platform/editor/common/editor';
  * and the modified version.
  */
 export class DiffEditorModel extends EditorModel {
-	protected _originalModel: IEditorModel;
-	protected _modifiedModel: IEditorModel;
 
-	constructor(originalModel: IEditorModel, modifiedModel: IEditorModel) {
+	protected readonly _originalModel: IEditorModel | undefined;
+	get originalModel(): IEditorModel | undefined { return this._originalModel; }
+
+	protected readonly _modifiedModel: IEditorModel | undefined;
+	get modifiedModel(): IEditorModel | undefined { return this._modifiedModel; }
+
+	constructor(originalModel: IEditorModel | undefined, modifiedModel: IEditorModel | undefined) {
 		super();
 
 		this._originalModel = originalModel;
 		this._modifiedModel = modifiedModel;
 	}
 
-	get originalModel(): EditorModel {
-		return this._originalModel as EditorModel;
-	}
+	async load(): Promise<EditorModel> {
+		await Promise.all([
+			this._originalModel?.load(),
+			this._modifiedModel?.load()
+		]);
 
-	get modifiedModel(): EditorModel {
-		return this._modifiedModel as EditorModel;
-	}
-
-	load(): TPromise<EditorModel> {
-		return TPromise.join([
-			this._originalModel.load(),
-			this._modifiedModel.load()
-		]).then(() => {
-			return this;
-		});
+		return this;
 	}
 
 	isResolved(): boolean {
-		return this.originalModel.isResolved() && this.modifiedModel.isResolved();
+		return this.originalModel instanceof EditorModel && this.originalModel.isResolved() && this.modifiedModel instanceof EditorModel && this.modifiedModel.isResolved();
 	}
 
 	dispose(): void {

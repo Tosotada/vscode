@@ -2,18 +2,19 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+
 import * as assert from 'assert';
-import { DefaultEndOfLine } from 'vs/editor/common/model';
-import { createTextBufferFactory } from 'vs/editor/common/model/textModel';
 import * as strings from 'vs/base/common/strings';
+import { DefaultEndOfLine } from 'vs/editor/common/model';
 import { PieceTreeTextBuffer } from 'vs/editor/common/model/pieceTreeTextBuffer/pieceTreeTextBuffer';
+import { createTextBufferFactory } from 'vs/editor/common/model/textModel';
 
 export function testTextBufferFactory(text: string, eol: string, mightContainNonBasicASCII: boolean, mightContainRTL: boolean): void {
-	const textBuffer = <PieceTreeTextBuffer>createTextBufferFactory(text).create(DefaultEndOfLine.LF);
+	const textBuffer = <PieceTreeTextBuffer>createTextBufferFactory(text).create(DefaultEndOfLine.LF).textBuffer;
 
-	assert.equal(textBuffer.mightContainNonBasicASCII(), mightContainNonBasicASCII);
-	assert.equal(textBuffer.mightContainRTL(), mightContainRTL);
-	assert.equal(textBuffer.getEOL(), eol);
+	assert.strictEqual(textBuffer.mightContainNonBasicASCII(), mightContainNonBasicASCII);
+	assert.strictEqual(textBuffer.mightContainRTL(), mightContainRTL);
+	assert.strictEqual(textBuffer.getEOL(), eol);
 }
 
 suite('ModelBuilder', () => {

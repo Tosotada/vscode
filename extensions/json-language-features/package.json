@@ -4,6 +4,7 @@
   "description": "%description%",
   "version": "1.0.0",
   "publisher": "vscode",
+  "license": "MIT",
   "aiKey": "AIF-d9b70cd4-b9f9-4d70-929b-a071c400b217",
   "engines": {
     "vscode": "0.10.x"
@@ -13,11 +14,12 @@
     "onLanguage:json",
     "onLanguage:jsonc"
   ],
+  "main": "./client/out/node/jsonClientMain",
+  "browser": "./client/dist/browser/jsonClientMain",
   "enableProposedApi": true,
-  "main": "./client/out/jsonMain",
   "scripts": {
-    "compile": "gulp compile-extension:json-language-features-client && gulp compile-extension:json-language-features-server",
-    "postinstall": "cd server && yarn install",
+    "compile": "gulp compile-extension:json-language-features-client compile-extension:json-language-features-server",
+    "watch": "gulp watch-extension:json-language-features-client watch-extension:json-language-features-server",
     "install-client-next": "yarn add vscode-languageclient@next"
   },
   "categories": [
@@ -88,6 +90,19 @@
           "default": true,
           "description": "%json.colorDecorators.enable.desc%",
           "deprecationMessage": "%json.colorDecorators.enable.deprecationMessage%"
+        },
+        "json.maxItemsComputed": {
+          "type": "number",
+          "default": 5000,
+          "description": "%json.maxItemsComputed.desc%"
+        },
+        "json.schemaDownload.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "%json.enableSchemaDownload.desc%",
+          "tags": [
+            "usesOnlineServices"
+          ]
         }
       }
     },
@@ -95,16 +110,34 @@
       "[json]": {
         "editor.quickSuggestions": {
           "strings": true
-        }
+        },
+        "editor.suggest.insertMode": "replace"
+      },
+      "[jsonc]": {
+        "editor.quickSuggestions": {
+          "strings": true
+        },
+        "editor.suggest.insertMode": "replace"
       }
-    }
+    },
+    "jsonValidation": [
+      {
+        "fileMatch": "*.schema.json",
+        "url": "http://json-schema.org/draft-07/schema#"
+      }
+    ]
   },
   "dependencies": {
-    "vscode-extension-telemetry": "0.0.22",
-    "vscode-languageclient": "^5.1.0",
-    "vscode-nls": "^4.0.0"
+    "request-light": "^0.4.0",
+    "vscode-extension-telemetry": "0.1.1",
+    "vscode-languageclient": "^7.0.0",
+    "vscode-nls": "^5.0.0"
   },
   "devDependencies": {
-    "@types/node": "^8.10.25"
+    "@types/node": "^12.19.9"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/vscode.git"
   }
 }

@@ -3,152 +3,101 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as fs from 'fs';
 import * as nls from 'vs/nls';
-import * as path from 'path';
+import * as path from 'vs/base/common/path';
 import * as pfs from 'vs/base/node/pfs';
-import * as errors from 'vs/base/common/errors';
-import { assign } from 'vs/base/common/objects';
 import { toDisposable, Disposable } from 'vs/base/common/lifecycle';
-import { flatten } from 'vs/base/common/arrays';
-import { extract, buffer, ExtractError, zip, IFile } from 'vs/platform/node/zip';
-import { ValueCallback, ErrorCallback } from 'vs/base/common/winjs.base';
+import { isNonEmptyArray } from 'vs/base/common/arrays';
+import { zip, IFile } from 'vs/base/node/zip';
 import {
 	IExtensionManagementService, IExtensionGalleryService, ILocalExtension,
-	IGalleryExtension, IExtensionManifest, IGalleryMetadata,
-	InstallExtensionEvent, DidInstallExtensionEvent, DidUninstallExtensionEvent, LocalExtensionType,
+	IGalleryExtension, IGalleryMetadata,
+	InstallExtensionEvent, DidInstallExtensionEvent, DidUninstallExtensionEvent,
 	StatisticType,
 	IExtensionIdentifier,
 	IReportedExtension,
-	InstallOperation
+	InstallOperation,
+	INSTALL_ERROR_MALICIOUS,
+	INSTALL_ERROR_INCOMPATIBLE,
+	ExtensionManagementError,
+	InstallOptions,
+	UninstallOptions
 } from 'vs/platform/extensionManagement/common/extensionManagement';
-import { getGalleryExtensionIdFromLocal, adoptToGalleryExtensionId, areSameExtensions, getGalleryExtensionId, groupByExtension, getMaliciousExtensionsSet, getLocalExtensionId, getGalleryExtensionTelemetryData, getLocalExtensionTelemetryData, getIdFromLocalExtensionId } from 'vs/platform/extensionManagement/common/extensionManagementUtil';
-import { localizeManifest } from '../common/extensionNls';
-import { IEnvironmentService } from 'vs/platform/environment/common/environment';
-import { Limiter, always, createCancelablePromise, CancelablePromise } from 'vs/base/common/async';
+import { areSameExtensions, getGalleryExtensionId, getMaliciousExtensionsSet, getGalleryExtensionTelemetryData, getLocalExtensionTelemetryData, ExtensionIdentifierWithVersion } from 'vs/platform/extensionManagement/common/extensionManagementUtil';
+import { INativeEnvironmentService } from 'vs/platform/environment/common/environment';
+import { createCancelablePromise, CancelablePromise, Promises } from 'vs/base/common/async';
 import { Event, Emitter } from 'vs/base/common/event';
-import * as semver from 'semver';
+import * as semver from 'vs/base/common/semver/semver';
 import { URI } from 'vs/base/common/uri';
-import pkg from 'vs/platform/node/package';
-import { isMacintosh, isWindows } from 'vs/base/common/platform';
+import product from 'vs/platform/product/common/product';
+import { isMacintosh } from 'vs/base/common/platform';
 import { ILogService } from 'vs/platform/log/common/log';
 import { ExtensionsManifestCache } from 'vs/platform/extensionManagement/node/extensionsManifestCache';
-import { IDialogService } from 'vs/platform/dialogs/common/dialogs';
-import Severity from 'vs/base/common/severity';
-import { ExtensionsLifecycle } from 'vs/platform/extensionManagement/node/extensionLifecycle';
 import { toErrorMessage } from 'vs/base/common/errorMessage';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
-import { isEngineValid } from 'vs/platform/extensions/node/extensionValidator';
-import { tmpdir } from 'os';
+import { isEngineValid } from 'vs/platform/extensions/common/extensionValidator';
+import { joinPath } from 'vs/base/common/resources';
 import { generateUuid } from 'vs/base/common/uuid';
 import { IDownloadService } from 'vs/platform/download/common/download';
-import { optional } from 'vs/platform/instantiation/common/instantiation';
+import { optional, IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { Schemas } from 'vs/base/common/network';
 import { CancellationToken } from 'vs/base/common/cancellation';
+import { getManifest } from 'vs/platform/extensionManagement/node/extensionManagementUtil';
+import { IExtensionManifest, ExtensionType } from 'vs/platform/extensions/common/extensions';
+import { ExtensionsDownloader } from 'vs/platform/extensionManagement/node/extensionDownloader';
+import { ExtensionsScanner, ILocalExtensionManifest, IMetadata } from 'vs/platform/extensionManagement/node/extensionsScanner';
+import { ExtensionsLifecycle } from 'vs/platform/extensionManagement/node/extensionLifecycle';
 
-const ERROR_SCANNING_SYS_EXTENSIONS = 'scanningSystem';
-const ERROR_SCANNING_USER_EXTENSIONS = 'scanningUser';
 const INSTALL_ERROR_UNSET_UNINSTALLED = 'unsetUninstalled';
-const INSTALL_ERROR_INCOMPATIBLE = 'incompatible';
 const INSTALL_ERROR_DOWNLOADING = 'downloading';
 const INSTALL_ERROR_VALIDATING = 'validating';
-const INSTALL_ERROR_GALLERY = 'gallery';
 const INSTALL_ERROR_LOCAL = 'local';
-const INSTALL_ERROR_EXTRACTING = 'extracting';
-const INSTALL_ERROR_RENAMING = 'renaming';
-const INSTALL_ERROR_DELETING = 'deleting';
-const INSTALL_ERROR_MALICIOUS = 'malicious';
 const ERROR_UNKNOWN = 'unknown';
-
-export class ExtensionManagementError extends Error {
-	constructor(message: string, readonly code: string) {
-		super(message);
-	}
-}
-
-function parseManifest(raw: string): Promise<{ manifest: IExtensionManifest; metadata: IGalleryMetadata; }> {
-	return new Promise((c, e) => {
-		try {
-			const manifest = JSON.parse(raw);
-			const metadata = manifest.__metadata || null;
-			delete manifest.__metadata;
-			c({ manifest, metadata });
-		} catch (err) {
-			e(new Error(nls.localize('invalidManifest', "Extension invalid: package.json is not a JSON file.")));
-		}
-	});
-}
-
-export function validateLocalExtension(zipPath: string): Promise<IExtensionManifest> {
-	return buffer(zipPath, 'extension/package.json')
-		.then(buffer => parseManifest(buffer.toString('utf8')))
-		.then(({ manifest }) => manifest);
-}
-
-function readManifest(extensionPath: string): Promise<{ manifest: IExtensionManifest; metadata: IGalleryMetadata; }> {
-	const promises = [
-		pfs.readFile(path.join(extensionPath, 'package.json'), 'utf8')
-			.then(raw => parseManifest(raw)),
-		pfs.readFile(path.join(extensionPath, 'package.nls.json'), 'utf8')
-			.then(null, err => err.code !== 'ENOENT' ? Promise.reject<string>(err) : '{}')
-			.then(raw => JSON.parse(raw))
-	];
-
-	return Promise.all<any>(promises).then(([{ manifest, metadata }, translations]) => {
-		return {
-			manifest: localizeManifest(manifest, translations),
-			metadata
-		};
-	});
-}
 
 interface InstallableExtension {
 	zipPath: string;
-	id: string;
-	metadata?: IGalleryMetadata;
+	identifierWithVersion: ExtensionIdentifierWithVersion;
+	metadata?: IMetadata;
 }
 
 export class ExtensionManagementService extends Disposable implements IExtensionManagementService {
 
-	_serviceBrand: any;
+	declare readonly _serviceBrand: undefined;
 
-	private systemExtensionsPath: string;
-	private extensionsPath: string;
-	private uninstalledPath: string;
-	private uninstalledFileLimiter: Limiter<void>;
+	private readonly extensionsScanner: ExtensionsScanner;
 	private reportedExtensions: Promise<IReportedExtension[]> | undefined;
 	private lastReportTimestamp = 0;
-	private readonly installingExtensions: Map<string, CancelablePromise<void>> = new Map<string, CancelablePromise<void>>();
+	private readonly installingExtensions = new Map<string, CancelablePromise<ILocalExtension>>();
 	private readonly uninstallingExtensions: Map<string, CancelablePromise<void>> = new Map<string, CancelablePromise<void>>();
 	private readonly manifestCache: ExtensionsManifestCache;
-	private readonly extensionLifecycle: ExtensionsLifecycle;
+	private readonly extensionsDownloader: ExtensionsDownloader;
 
-	private readonly _onInstallExtension = new Emitter<InstallExtensionEvent>();
+	private readonly _onInstallExtension = this._register(new Emitter<InstallExtensionEvent>());
 	readonly onInstallExtension: Event<InstallExtensionEvent> = this._onInstallExtension.event;
 
-	private readonly _onDidInstallExtension = new Emitter<DidInstallExtensionEvent>();
+	private readonly _onDidInstallExtension = this._register(new Emitter<DidInstallExtensionEvent>());
 	readonly onDidInstallExtension: Event<DidInstallExtensionEvent> = this._onDidInstallExtension.event;
 
-	private readonly _onUninstallExtension = new Emitter<IExtensionIdentifier>();
+	private readonly _onUninstallExtension = this._register(new Emitter<IExtensionIdentifier>());
 	readonly onUninstallExtension: Event<IExtensionIdentifier> = this._onUninstallExtension.event;
 
-	private _onDidUninstallExtension = new Emitter<DidUninstallExtensionEvent>();
+	private _onDidUninstallExtension = this._register(new Emitter<DidUninstallExtensionEvent>());
 	onDidUninstallExtension: Event<DidUninstallExtensionEvent> = this._onDidUninstallExtension.event;
 
 	constructor(
-		@IEnvironmentService environmentService: IEnvironmentService,
-		@IDialogService private dialogService: IDialogService,
-		@IExtensionGalleryService private galleryService: IExtensionGalleryService,
-		@ILogService private logService: ILogService,
+		@INativeEnvironmentService private readonly environmentService: INativeEnvironmentService,
+		@IExtensionGalleryService private readonly galleryService: IExtensionGalleryService,
+		@ILogService private readonly logService: ILogService,
 		@optional(IDownloadService) private downloadService: IDownloadService,
-		@ITelemetryService private telemetryService: ITelemetryService,
+		@ITelemetryService private readonly telemetryService: ITelemetryService,
+		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super();
-		this.systemExtensionsPath = environmentService.builtinExtensionsPath;
-		this.extensionsPath = environmentService.extensionsPath;
-		this.uninstalledPath = path.join(this.extensionsPath, '.obsolete');
-		this.uninstalledFileLimiter = new Limiter(1);
+		const extensionLifecycle = this._register(instantiationService.createInstance(ExtensionsLifecycle));
+		this.extensionsScanner = this._register(instantiationService.createInstance(ExtensionsScanner, extension => extensionLifecycle.postUninstall(extension)));
 		this.manifestCache = this._register(new ExtensionsManifestCache(environmentService, this));
-		this.extensionLifecycle = this._register(new ExtensionsLifecycle(this.logService));
+		this.extensionsDownloader = this._register(instantiationService.createInstance(ExtensionsDownloader));
 
 		this._register(toDisposable(() => {
 			this.installingExtensions.forEach(promise => promise.cancel());
@@ -158,24 +107,31 @@ export class ExtensionManagementService extends Disposable implements IExtension
 		}));
 	}
 
-	zip(extension: ILocalExtension): Promise<URI> {
+	async zip(extension: ILocalExtension): Promise<URI> {
 		this.logService.trace('ExtensionManagementService#zip', extension.identifier.id);
-		return this.collectFiles(extension)
-			.then(files => zip(path.join(tmpdir(), generateUuid()), files))
-			.then(path => URI.file(path));
+		const files = await this.collectFiles(extension);
+		const location = await zip(joinPath(this.environmentService.tmpDir, generateUuid()).fsPath, files);
+		return URI.file(location);
 	}
 
-	unzip(zipLocation: URI, type: LocalExtensionType): Promise<IExtensionIdentifier> {
+	async unzip(zipLocation: URI): Promise<IExtensionIdentifier> {
 		this.logService.trace('ExtensionManagementService#unzip', zipLocation.toString());
-		return this.install(zipLocation, type);
+		const local = await this.install(zipLocation);
+		return local.identifier;
 	}
 
-	private collectFiles(extension: ILocalExtension): Promise<IFile[]> {
+	async getManifest(vsix: URI): Promise<IExtensionManifest> {
+		const downloadLocation = await this.downloadVsix(vsix);
+		const zipPath = path.resolve(downloadLocation.fsPath);
+		return getManifest(zipPath);
+	}
 
-		const collectFilesFromDirectory = async (dir): Promise<string[]> => {
+	private async collectFiles(extension: ILocalExtension): Promise<IFile[]> {
+
+		const collectFilesFromDirectory = async (dir: string): Promise<string[]> => {
 			let entries = await pfs.readdir(dir);
 			entries = entries.map(e => path.join(dir, e));
-			const stats = await Promise.all(entries.map(e => pfs.stat(e)));
+			const stats = await Promise.all(entries.map(e => fs.promises.stat(e)));
 			let promise: Promise<string[]> = Promise.resolve([]);
 			stats.forEach((stat, index) => {
 				const entry = entries[index];
@@ -191,412 +147,387 @@ export class ExtensionManagementService extends Disposable implements IExtension
 			return promise;
 		};
 
-		return collectFilesFromDirectory(extension.location.fsPath)
-			.then(files => files.map(f => (<IFile>{ path: `extension/${path.relative(extension.location.fsPath, f)}`, localPath: f })));
-
+		const files = await collectFilesFromDirectory(extension.location.fsPath);
+		return files.map(f => (<IFile>{ path: `extension/${path.relative(extension.location.fsPath, f)}`, localPath: f }));
 	}
 
-	install(vsix: URI, type: LocalExtensionType = LocalExtensionType.User): Promise<IExtensionIdentifier> {
+	async install(vsix: URI, options: InstallOptions = {}): Promise<ILocalExtension> {
 		this.logService.trace('ExtensionManagementService#install', vsix.toString());
-		return createCancelablePromise(token => {
-			return this.downloadVsix(vsix)
-				.then(downloadLocation => {
-					const zipPath = path.resolve(downloadLocation.fsPath);
+		return createCancelablePromise(async token => {
 
-					return validateLocalExtension(zipPath)
-						.then(manifest => {
-							const identifier = { id: getLocalExtensionIdFromManifest(manifest) };
-							if (manifest.engines && manifest.engines.vscode && !isEngineValid(manifest.engines.vscode)) {
-								return Promise.reject(new Error(nls.localize('incompatible', "Unable to install Extension '{0}' as it is not compatible with Code '{1}'.", identifier.id, pkg.version)));
-							}
-							return this.removeIfExists(identifier.id)
-								.then(
-									() => this.checkOutdated(manifest)
-										.then(validated => {
-											if (validated) {
-												this.logService.info('Installing the extension:', identifier.id);
-												this._onInstallExtension.fire({ identifier, zipPath });
-												return this.getMetadata(getGalleryExtensionId(manifest.publisher, manifest.name))
-													.then(
-														metadata => this.installFromZipPath(identifier, zipPath, metadata, type, token),
-														error => this.installFromZipPath(identifier, zipPath, null, type, token))
-													.then(
-														() => { this.logService.info('Successfully installed the extension:', identifier.id); return identifier; },
-														e => {
-															this.logService.error('Failed to install the extension:', identifier.id, e.message);
-															return Promise.reject(e);
-														});
-											}
-											return null;
-										}),
-									e => Promise.reject(new Error(nls.localize('restartCode', "Please restart Code before reinstalling {0}.", manifest.displayName || manifest.name))));
-						});
-				});
+			const downloadLocation = await this.downloadVsix(vsix);
+			const zipPath = path.resolve(downloadLocation.fsPath);
+
+			const manifest = await getManifest(zipPath);
+			const identifier = { id: getGalleryExtensionId(manifest.publisher, manifest.name) };
+			let operation: InstallOperation = InstallOperation.Install;
+			if (manifest.engines && manifest.engines.vscode && !isEngineValid(manifest.engines.vscode, product.version)) {
+				throw new Error(nls.localize('incompatible', "Unable to install extension '{0}' as it is not compatible with VS Code '{1}'.", identifier.id, product.version));
+			}
+
+			const identifierWithVersion = new ExtensionIdentifierWithVersion(identifier, manifest.version);
+			const installedExtensions = await this.getInstalled(ExtensionType.User);
+			const existing = installedExtensions.find(i => areSameExtensions(identifier, i.identifier));
+			if (existing) {
+				options.isMachineScoped = options.isMachineScoped || existing.isMachineScoped;
+				options.isBuiltin = options.isBuiltin || existing.isBuiltin;
+				operation = InstallOperation.Update;
+				if (identifierWithVersion.equals(new ExtensionIdentifierWithVersion(existing.identifier, existing.manifest.version))) {
+					try {
+						await this.extensionsScanner.removeExtension(existing, 'existing');
+					} catch (e) {
+						throw new Error(nls.localize('restartCode', "Please restart VS Code before reinstalling {0}.", manifest.displayName || manifest.name));
+					}
+				} else if (semver.gt(existing.manifest.version, manifest.version)) {
+					await this.uninstallExtension(existing);
+				}
+			} else {
+				// Remove the extension with same version if it is already uninstalled.
+				// Installing a VSIX extension shall replace the existing extension always.
+				const existing = await this.unsetUninstalledAndGetLocal(identifierWithVersion);
+				if (existing) {
+					try {
+						await this.extensionsScanner.removeExtension(existing, 'existing');
+					} catch (e) {
+						throw new Error(nls.localize('restartCode', "Please restart VS Code before reinstalling {0}.", manifest.displayName || manifest.name));
+					}
+				}
+			}
+
+			this.logService.info('Installing the extension:', identifier.id);
+			this._onInstallExtension.fire({ identifier, zipPath });
+
+			let metadata: IGalleryMetadata | undefined;
+			try {
+				metadata = await this.getGalleryMetadata(getGalleryExtensionId(manifest.publisher, manifest.name));
+			} catch (e) { /* Ignore */ }
+
+			try {
+				const local = await this.installFromZipPath(identifierWithVersion, zipPath, { ...(metadata || {}), ...options }, options, operation, token);
+				this.logService.info('Successfully installed the extension:', identifier.id);
+				return local;
+			} catch (e) {
+				this.logService.error('Failed to install the extension:', identifier.id, e.message);
+				throw e;
+			}
 		});
 	}
 
-	private downloadVsix(vsix: URI): Promise<URI> {
+	private async downloadVsix(vsix: URI): Promise<URI> {
 		if (vsix.scheme === Schemas.file) {
-			return Promise.resolve(vsix);
+			return vsix;
 		}
 		if (!this.downloadService) {
 			throw new Error('Download service is not available');
 		}
-		const downloadedLocation = path.join(tmpdir(), generateUuid());
-		return this.downloadService.download(vsix, downloadedLocation).then(() => URI.file(downloadedLocation));
+
+		const downloadedLocation = joinPath(this.environmentService.tmpDir, generateUuid());
+		await this.downloadService.download(vsix, downloadedLocation);
+		return downloadedLocation;
 	}
 
-	private removeIfExists(id: string): Promise<void> {
-		return this.getInstalled(LocalExtensionType.User)
-			.then(installed => installed.filter(i => i.identifier.id === id)[0])
-			.then(existing => existing ? this.removeExtension(existing, 'existing') : null);
-	}
-
-	private checkOutdated(manifest: IExtensionManifest): Promise<boolean> {
-		const extensionIdentifier = { id: getGalleryExtensionId(manifest.publisher, manifest.name) };
-		return this.getInstalled(LocalExtensionType.User)
-			.then(installedExtensions => {
-				const newer = installedExtensions.filter(local => areSameExtensions(extensionIdentifier, { id: getGalleryExtensionIdFromLocal(local) }) && semver.gt(local.manifest.version, manifest.version))[0];
-				if (newer) {
-					const message = nls.localize('installingOutdatedExtension', "A newer version of this extension is already installed. Would you like to override this with the older version?");
-					const buttons = [
-						nls.localize('override', "Override"),
-						nls.localize('cancel', "Cancel")
-					];
-					return this.dialogService.show(Severity.Info, message, buttons, { cancelId: 1 })
-						.then<boolean>(value => {
-							if (value === 0) {
-								return this.uninstall(newer, true).then(() => true);
-							}
-							return Promise.reject(errors.canceled());
-						});
-				}
-				return true;
-			});
-	}
-
-	private installFromZipPath(identifier: IExtensionIdentifier, zipPath: string, metadata: IGalleryMetadata, type: LocalExtensionType, token: CancellationToken): Promise<ILocalExtension> {
-		return this.toNonCancellablePromise(this.getInstalled()
-			.then(installed => {
-				const operation = this.getOperation({ id: getIdFromLocalExtensionId(identifier.id), uuid: identifier.uuid }, installed);
-				return this.installExtension({ zipPath, id: identifier.id, metadata }, type, token)
-					.then(local => this.installDependenciesAndPackExtensions(local, null).then(() => local, error => this.uninstall(local, true).then(() => Promise.reject(error), () => Promise.reject(error))))
-					.then(
-						local => { this._onDidInstallExtension.fire({ identifier, zipPath, local, operation }); return local; },
-						error => { this._onDidInstallExtension.fire({ identifier, zipPath, operation, error }); return Promise.reject(error); }
-					);
-			}));
-	}
-
-	installFromGallery(extension: IGalleryExtension): Promise<void> {
-		this.logService.trace('ExtensionManagementService#installFromGallery', extension.identifier.id);
-		let cancellablePromise = this.installingExtensions.get(extension.identifier.id);
-		if (!cancellablePromise) {
-
-			let cancellationToken: CancellationToken, successCallback: ValueCallback<void>, errorCallback: ErrorCallback;
-			cancellablePromise = createCancelablePromise(token => { cancellationToken = token; return new Promise((c, e) => { successCallback = c; errorCallback = e; }); });
-			this.installingExtensions.set(extension.identifier.id, cancellablePromise);
-
+	private async installFromZipPath(identifierWithVersion: ExtensionIdentifierWithVersion, zipPath: string, metadata: IMetadata | undefined, options: InstallOptions, operation: InstallOperation, token: CancellationToken): Promise<ILocalExtension> {
+		try {
+			const local = await this.installExtension({ zipPath, identifierWithVersion, metadata }, token);
 			try {
-				const startTime = new Date().getTime();
-				const identifier = { id: getLocalExtensionIdFromGallery(extension, extension.version), uuid: extension.identifier.uuid };
-				const telemetryData = getGalleryExtensionTelemetryData(extension);
-				let operation: InstallOperation = InstallOperation.Install;
-
-				this.logService.info('Installing extension:', extension.name);
-				this._onInstallExtension.fire({ identifier, gallery: extension });
-
-				this.checkMalicious(extension)
-					.then(() => this.getInstalled(LocalExtensionType.User))
-					.then(installed => {
-						const existingExtension = installed.filter(i => areSameExtensions(i.galleryIdentifier, extension.identifier))[0];
-						operation = existingExtension ? InstallOperation.Update : InstallOperation.Install;
-						return this.downloadInstallableExtension(extension, operation)
-							.then(installableExtension => this.installExtension(installableExtension, LocalExtensionType.User, cancellationToken).then(local => always(pfs.rimraf(installableExtension.zipPath), () => null).then(() => local)))
-							.then(local => this.installDependenciesAndPackExtensions(local, existingExtension)
-								.then(() => local, error => this.uninstall(local, true).then(() => Promise.reject(error), () => Promise.reject(error))));
-					})
-					.then(
-						local => {
-							this.installingExtensions.delete(extension.identifier.id);
-							this.logService.info(`Extensions installed successfully:`, extension.identifier.id);
-							this._onDidInstallExtension.fire({ identifier, gallery: extension, local, operation });
-							this.reportTelemetry(this.getTelemetryEvent(operation), telemetryData, new Date().getTime() - startTime, void 0);
-							successCallback(null);
-						},
-						error => {
-							this.installingExtensions.delete(extension.identifier.id);
-							const errorCode = error && (<ExtensionManagementError>error).code ? (<ExtensionManagementError>error).code : ERROR_UNKNOWN;
-							this.logService.error(`Failed to install extension:`, extension.identifier.id, error ? error.message : errorCode);
-							this._onDidInstallExtension.fire({ identifier, gallery: extension, operation, error: errorCode });
-							this.reportTelemetry(this.getTelemetryEvent(operation), telemetryData, new Date().getTime() - startTime, error);
-							errorCallback(error);
-						});
-
+				await this.installDependenciesAndPackExtensions(local, undefined, options);
 			} catch (error) {
-				this.installingExtensions.delete(extension.identifier.id);
-				errorCallback(error);
+				if (isNonEmptyArray(local.manifest.extensionDependencies)) {
+					this.logService.warn(`Cannot install dependencies of extension:`, local.identifier.id, error.message);
+				}
+				if (isNonEmptyArray(local.manifest.extensionPack)) {
+					this.logService.warn(`Cannot install packed extensions of extension:`, local.identifier.id, error.message);
+				}
 			}
+			this._onDidInstallExtension.fire({ identifier: identifierWithVersion, zipPath, local, operation });
+			return local;
+		} catch (error) {
+			this._onDidInstallExtension.fire({ identifier: identifierWithVersion, zipPath, operation, error });
+			throw error;
+		}
+	}
 
+	async canInstall(extension: IGalleryExtension): Promise<boolean> {
+		return true;
+	}
+
+	async installFromGallery(extension: IGalleryExtension, options: InstallOptions = {}): Promise<ILocalExtension> {
+		if (!this.galleryService.isEnabled()) {
+			throw new Error(nls.localize('MarketPlaceDisabled', "Marketplace is not enabled"));
+		}
+
+		try {
+			extension = await this.checkAndGetCompatibleVersion(extension);
+		} catch (error) {
+			const errorCode = error && (<ExtensionManagementError>error).code ? (<ExtensionManagementError>error).code : ERROR_UNKNOWN;
+			this.logService.error(`Failed to install extension:`, extension.identifier.id, error ? error.message : errorCode);
+			this.reportTelemetry(this.getTelemetryEvent(InstallOperation.Install), getGalleryExtensionTelemetryData(extension), undefined, error);
+			if (error instanceof Error) {
+				error.name = errorCode;
+			}
+			throw error;
+		}
+
+		const key = new ExtensionIdentifierWithVersion(extension.identifier, extension.version).key();
+		let cancellablePromise = this.installingExtensions.get(key);
+		if (!cancellablePromise) {
+			cancellablePromise = createCancelablePromise(token => this.doInstallFromGallery(extension, options, token));
+			this.installingExtensions.set(key, cancellablePromise);
+			cancellablePromise.finally(() => this.installingExtensions.delete(key));
 		}
 
 		return cancellablePromise;
 	}
 
-	reinstallFromGallery(extension: ILocalExtension): Promise<void> {
-		this.logService.trace('ExtensionManagementService#reinstallFromGallery', extension.identifier.id);
-		if (!this.galleryService.isEnabled()) {
-			return Promise.reject(new Error(nls.localize('MarketPlaceDisabled', "Marketplace is not enabled")));
-		}
-		return this.findGalleryExtension(extension)
-			.then(galleryExtension => {
-				if (galleryExtension) {
-					return this.setUninstalled(extension)
-						.then(() => this.removeUninstalledExtension(extension)
-							.then(
-								() => this.installFromGallery(galleryExtension),
-								e => Promise.reject(new Error(nls.localize('removeError', "Error while removing the extension: {0}. Please Quit and Start VS Code before trying again.", toErrorMessage(e))))));
+	private async doInstallFromGallery(extension: IGalleryExtension, options: InstallOptions, token: CancellationToken): Promise<ILocalExtension> {
+		const startTime = new Date().getTime();
+		let operation: InstallOperation = InstallOperation.Install;
+		this.logService.info('Installing extension:', extension.identifier.id);
+		this._onInstallExtension.fire({ identifier: extension.identifier, gallery: extension });
+
+		try {
+			const installed = await this.getInstalled(ExtensionType.User);
+			const existingExtension = installed.find(i => areSameExtensions(i.identifier, extension.identifier));
+			if (existingExtension) {
+				operation = InstallOperation.Update;
+			}
+
+			const installableExtension = await this.downloadInstallableExtension(extension, operation);
+			installableExtension.metadata.isMachineScoped = options.isMachineScoped || existingExtension?.isMachineScoped;
+			installableExtension.metadata.isBuiltin = options.isBuiltin || existingExtension?.isBuiltin;
+			const local = await this.installExtension(installableExtension, token);
+
+			try { await this.extensionsDownloader.delete(URI.file(installableExtension.zipPath)); } catch (error) { /* Ignore */ }
+
+			if (!options.donotIncludePackAndDependencies) {
+				try {
+					await this.installDependenciesAndPackExtensions(local, existingExtension, options);
+				} catch (error) {
+					try { await this.uninstall(local); } catch (error) { /* Ignore */ }
+					throw error;
 				}
-				return Promise.reject(new Error(nls.localize('Not a Marketplace extension', "Only Marketplace Extensions can be reinstalled")));
-			});
+			}
+
+			if (existingExtension && semver.neq(existingExtension.manifest.version, extension.version)) {
+				await this.setUninstalled(existingExtension);
+			}
+
+			this.logService.info(`Extensions installed successfully:`, extension.identifier.id);
+			this._onDidInstallExtension.fire({ identifier: extension.identifier, gallery: extension, local, operation });
+			this.reportTelemetry(this.getTelemetryEvent(operation), getGalleryExtensionTelemetryData(extension), new Date().getTime() - startTime, undefined);
+			return local;
+
+		} catch (error) {
+			const errorCode = error && (<ExtensionManagementError>error).code ? (<ExtensionManagementError>error).code : ERROR_UNKNOWN;
+			this.logService.error(`Failed to install extension:`, extension.identifier.id, error ? error.message : errorCode);
+			this._onDidInstallExtension.fire({ identifier: extension.identifier, gallery: extension, operation, error: errorCode });
+			this.reportTelemetry(this.getTelemetryEvent(operation), getGalleryExtensionTelemetryData(extension), new Date().getTime() - startTime, error);
+			if (error instanceof Error) {
+				error.name = errorCode;
+			}
+			throw error;
+		}
 	}
 
-	private getOperation(extensionToInstall: IExtensionIdentifier, installed: ILocalExtension[]): InstallOperation {
-		return installed.some(i => areSameExtensions({ id: getGalleryExtensionIdFromLocal(i), uuid: i.identifier.uuid }, extensionToInstall)) ? InstallOperation.Update : InstallOperation.Install;
+	private async checkAndGetCompatibleVersion(extension: IGalleryExtension): Promise<IGalleryExtension> {
+		if (await this.isMalicious(extension)) {
+			throw new ExtensionManagementError(nls.localize('malicious extension', "Can't install extension since it was reported to be problematic."), INSTALL_ERROR_MALICIOUS);
+		}
+
+		const compatibleExtension = await this.galleryService.getCompatibleExtension(extension);
+		if (!compatibleExtension) {
+			throw new ExtensionManagementError(nls.localize('notFoundCompatibleDependency', "Unable to install '{0}' extension because it is not compatible with the current version of VS Code (version {1}).", extension.identifier.id, product.version), INSTALL_ERROR_INCOMPATIBLE);
+		}
+
+		return compatibleExtension;
+	}
+
+	async reinstallFromGallery(extension: ILocalExtension): Promise<void> {
+		this.logService.trace('ExtensionManagementService#reinstallFromGallery', extension.identifier.id);
+		if (!this.galleryService.isEnabled()) {
+			throw new Error(nls.localize('MarketPlaceDisabled', "Marketplace is not enabled"));
+		}
+
+		const galleryExtension = await this.findGalleryExtension(extension);
+		if (!galleryExtension) {
+			throw new Error(nls.localize('Not a Marketplace extension', "Only Marketplace Extensions can be reinstalled"));
+		}
+
+		await this.setUninstalled(extension);
+		try {
+			await this.extensionsScanner.removeUninstalledExtension(extension);
+		} catch (e) {
+			throw new Error(nls.localize('removeError', "Error while removing the extension: {0}. Please Quit and Start VS Code before trying again.", toErrorMessage(e)));
+		}
+
+		await this.installFromGallery(galleryExtension);
 	}
 
 	private getTelemetryEvent(operation: InstallOperation): string {
 		return operation === InstallOperation.Update ? 'extensionGallery:update' : 'extensionGallery:install';
 	}
 
-	private checkMalicious(extension: IGalleryExtension): Promise<void> {
-		return this.getExtensionsReport()
-			.then(report => {
-				if (getMaliciousExtensionsSet(report).has(extension.identifier.id)) {
-					throw new ExtensionManagementError(INSTALL_ERROR_MALICIOUS, nls.localize('malicious extension', "Can't install extension since it was reported to be problematic."));
-				} else {
-					return null;
-				}
-			});
+	private async isMalicious(extension: IGalleryExtension): Promise<boolean> {
+		const report = await this.getExtensionsReport();
+		return getMaliciousExtensionsSet(report).has(extension.identifier.id);
 	}
 
-	private downloadInstallableExtension(extension: IGalleryExtension, operation: InstallOperation): Promise<InstallableExtension> {
+	private async downloadInstallableExtension(extension: IGalleryExtension, operation: InstallOperation): Promise<Required<InstallableExtension>> {
 		const metadata = <IGalleryMetadata>{
 			id: extension.identifier.uuid,
 			publisherId: extension.publisherId,
 			publisherDisplayName: extension.publisherDisplayName,
 		};
 
-		return this.galleryService.loadCompatibleVersion(extension)
-			.then(
-				compatible => {
-					if (compatible) {
-						this.logService.trace('Started downloading extension:', extension.name);
-						return this.galleryService.download(compatible, operation)
-							.then(
-								zipPath => {
-									this.logService.info('Downloaded extension:', extension.name, zipPath);
-									return validateLocalExtension(zipPath)
-										.then(
-											manifest => (<InstallableExtension>{ zipPath, id: getLocalExtensionIdFromManifest(manifest), metadata }),
-											error => Promise.reject(new ExtensionManagementError(this.joinErrors(error).message, INSTALL_ERROR_VALIDATING))
-										);
-								},
-								error => Promise.reject(new ExtensionManagementError(this.joinErrors(error).message, INSTALL_ERROR_DOWNLOADING)));
-					} else {
-						return Promise.reject(new ExtensionManagementError(nls.localize('notFoundCompatibleDependency', "Unable to install because, the depending extension '{0}' compatible with current version '{1}' of VS Code is not found.", extension.identifier.id, pkg.version), INSTALL_ERROR_INCOMPATIBLE));
-					}
-				},
-				error => Promise.reject(new ExtensionManagementError(this.joinErrors(error).message, INSTALL_ERROR_GALLERY)));
+		let zipPath;
+		try {
+			this.logService.trace('Started downloading extension:', extension.identifier.id);
+			const zip = await this.extensionsDownloader.downloadExtension(extension, operation);
+			this.logService.info('Downloaded extension:', extension.identifier.id, zipPath);
+			zipPath = zip.fsPath;
+		} catch (error) {
+			throw new ExtensionManagementError(this.joinErrors(error).message, INSTALL_ERROR_DOWNLOADING);
+		}
+
+		try {
+			const manifest = await getManifest(zipPath);
+			return (<Required<InstallableExtension>>{ zipPath, identifierWithVersion: new ExtensionIdentifierWithVersion(extension.identifier, manifest.version), metadata });
+		} catch (error) {
+			throw new ExtensionManagementError(this.joinErrors(error).message, INSTALL_ERROR_VALIDATING);
+		}
 	}
 
-	private installExtension(installableExtension: InstallableExtension, type: LocalExtensionType, token: CancellationToken): Promise<ILocalExtension> {
-		return this.unsetUninstalledAndGetLocal(installableExtension.id)
-			.then(
-				local => {
-					if (local) {
-						return local;
-					}
-					return this.extractAndInstall(installableExtension, type, token);
-				},
-				e => {
-					if (isMacintosh) {
-						return Promise.reject(new ExtensionManagementError(nls.localize('quitCode', "Unable to install the extension. Please Quit and Start VS Code before reinstalling."), INSTALL_ERROR_UNSET_UNINSTALLED));
-					}
-					return Promise.reject(new ExtensionManagementError(nls.localize('exitCode', "Unable to install the extension. Please Exit and Start VS Code before reinstalling."), INSTALL_ERROR_UNSET_UNINSTALLED));
-				});
-	}
-
-	private unsetUninstalledAndGetLocal(id: string): Promise<ILocalExtension> {
-		return this.isUninstalled(id)
-			.then(isUninstalled => {
-				if (isUninstalled) {
-					this.logService.trace('Removing the extension from uninstalled list:', id);
-					// If the same version of extension is marked as uninstalled, remove it from there and return the local.
-					return this.unsetUninstalled(id)
-						.then(() => {
-							this.logService.info('Removed the extension from uninstalled list:', id);
-							return this.getInstalled(LocalExtensionType.User);
-						})
-						.then(installed => installed.filter(i => i.identifier.id === id)[0]);
-				}
-				return null;
-			});
-	}
-
-	private extractAndInstall({ zipPath, id, metadata }: InstallableExtension, type: LocalExtensionType, token: CancellationToken): Promise<ILocalExtension> {
-		const location = type === LocalExtensionType.User ? this.extensionsPath : this.systemExtensionsPath;
-		const tempPath = path.join(location, `.${id}`);
-		const extensionPath = path.join(location, id);
-		return pfs.rimraf(extensionPath)
-			.then(() => this.extractAndRename(id, zipPath, tempPath, extensionPath, token), e => Promise.reject(new ExtensionManagementError(nls.localize('errorDeleting', "Unable to delete the existing folder '{0}' while installing the extension '{1}'. Please delete the folder manually and try again", extensionPath, id), INSTALL_ERROR_DELETING)))
-			.then(() => {
-				this.logService.info('Installation completed.', id);
-				return this.scanExtension(id, location, type);
-			})
-			.then(local => {
-				if (metadata) {
-					local.metadata = metadata;
-					return this.saveMetadataForLocalExtension(local);
-				}
-				return local;
-			});
-	}
-
-	private extractAndRename(id: string, zipPath: string, extractPath: string, renamePath: string, token: CancellationToken): Promise<void> {
-		return this.extract(id, zipPath, extractPath, token)
-			.then(() => this.rename(id, extractPath, renamePath, Date.now() + (2 * 60 * 1000) /* Retry for 2 minutes */)
-				.then(
-					() => this.logService.info('Renamed to', renamePath),
-					e => {
-						this.logService.info('Rename failed. Deleting from extracted location', extractPath);
-						return always(pfs.rimraf(extractPath), () => null).then(() => Promise.reject(e));
-					}));
-	}
-
-	private extract(id: string, zipPath: string, extractPath: string, token: CancellationToken): Promise<void> {
-		this.logService.trace(`Started extracting the extension from ${zipPath} to ${extractPath}`);
-		return pfs.rimraf(extractPath)
-			.then(
-				() => extract(zipPath, extractPath, { sourcePath: 'extension', overwrite: true }, this.logService, token)
-					.then(
-						() => this.logService.info(`Extracted extension to ${extractPath}:`, id),
-						e => always(pfs.rimraf(extractPath), () => null)
-							.then(() => Promise.reject(new ExtensionManagementError(e.message, e instanceof ExtractError ? e.type : INSTALL_ERROR_EXTRACTING)))),
-				e => Promise.reject(new ExtensionManagementError(this.joinErrors(e).message, INSTALL_ERROR_DELETING)));
-	}
-
-	private rename(id: string, extractPath: string, renamePath: string, retryUntil: number): Promise<void> {
-		return pfs.rename(extractPath, renamePath)
-			.then(null, error => {
-				if (isWindows && error && error.code === 'EPERM' && Date.now() < retryUntil) {
-					this.logService.info(`Failed renaming ${extractPath} to ${renamePath} with 'EPERM' error. Trying again...`);
-					return this.rename(id, extractPath, renamePath, retryUntil);
-				}
-				return Promise.reject(new ExtensionManagementError(error.message || nls.localize('renameError', "Unknown error while renaming {0} to {1}", extractPath, renamePath), error.code || INSTALL_ERROR_RENAMING));
-			});
-	}
-
-	private installDependenciesAndPackExtensions(installed: ILocalExtension, existing: ILocalExtension): Promise<void> {
-		if (this.galleryService.isEnabled()) {
-			const dependenciesAndPackExtensions: string[] = installed.manifest.extensionDependencies || [];
-			if (installed.manifest.extensionPack) {
-				for (const extension of installed.manifest.extensionPack) {
-					// add only those extensions which are new in currently installed extension
-					if (!(existing && existing.manifest.extensionPack && existing.manifest.extensionPack.some(old => areSameExtensions({ id: old }, { id: extension })))) {
-						if (dependenciesAndPackExtensions.every(e => !areSameExtensions({ id: e }, { id: extension }))) {
-							dependenciesAndPackExtensions.push(extension);
-						}
-					}
-				}
+	private async installExtension(installableExtension: InstallableExtension, token: CancellationToken): Promise<ILocalExtension> {
+		try {
+			const local = await this.unsetUninstalledAndGetLocal(installableExtension.identifierWithVersion);
+			if (local) {
+				return installableExtension.metadata ? this.extensionsScanner.saveMetadataForLocalExtension(local, installableExtension.metadata) : local;
 			}
-			if (dependenciesAndPackExtensions.length) {
-				return this.getInstalled()
-					.then(installed => {
-						// filter out installing and installed extensions
-						const names = dependenciesAndPackExtensions.filter(id => !this.installingExtensions.has(adoptToGalleryExtensionId(id)) && installed.every(({ galleryIdentifier }) => !areSameExtensions(galleryIdentifier, { id })));
-						if (names.length) {
-							return this.galleryService.query({ names, pageSize: dependenciesAndPackExtensions.length })
-								.then(galleryResult => {
-									const extensionsToInstall = galleryResult.firstPage;
-									return Promise.all(extensionsToInstall.map(e => this.installFromGallery(e)))
-										.then(() => null, errors => this.rollback(extensionsToInstall).then(() => Promise.reject(errors), () => Promise.reject(errors)));
-								});
-						}
-						return null;
-					});
+		} catch (e) {
+			if (isMacintosh) {
+				throw new ExtensionManagementError(nls.localize('quitCode', "Unable to install the extension. Please Quit and Start VS Code before reinstalling."), INSTALL_ERROR_UNSET_UNINSTALLED);
+			} else {
+				throw new ExtensionManagementError(nls.localize('exitCode', "Unable to install the extension. Please Exit and Start VS Code before reinstalling."), INSTALL_ERROR_UNSET_UNINSTALLED);
 			}
 		}
-		return Promise.resolve(null);
+		return this.extractAndInstall(installableExtension, token);
 	}
 
-	private rollback(extensions: IGalleryExtension[]): Promise<void> {
-		return this.getInstalled(LocalExtensionType.User)
-			.then(installed =>
-				Promise.all(installed.filter(local => extensions.some(galleryExtension => local.identifier.id === getLocalExtensionIdFromGallery(galleryExtension, galleryExtension.version))) // Only check id (pub.name-version) because we want to rollback the exact version
-					.map(local => this.uninstall(local, true))))
-			.then(() => null, () => null);
+	private async unsetUninstalledAndGetLocal(identifierWithVersion: ExtensionIdentifierWithVersion): Promise<ILocalExtension | null> {
+		const isUninstalled = await this.isUninstalled(identifierWithVersion);
+		if (!isUninstalled) {
+			return null;
+		}
+
+		this.logService.trace('Removing the extension from uninstalled list:', identifierWithVersion.id);
+		// If the same version of extension is marked as uninstalled, remove it from there and return the local.
+		await this.unsetUninstalled(identifierWithVersion);
+		this.logService.info('Removed the extension from uninstalled list:', identifierWithVersion.id);
+
+		const installed = await this.getInstalled(ExtensionType.User);
+		return installed.find(i => new ExtensionIdentifierWithVersion(i.identifier, i.manifest.version).equals(identifierWithVersion)) || null;
 	}
 
-	uninstall(extension: ILocalExtension, force = false): Promise<void> {
+	private async extractAndInstall({ zipPath, identifierWithVersion, metadata }: InstallableExtension, token: CancellationToken): Promise<ILocalExtension> {
+		let local = await this.extensionsScanner.extractUserExtension(identifierWithVersion, zipPath, token);
+		this.logService.info('Installation completed.', identifierWithVersion.id);
+		if (metadata) {
+			local = await this.extensionsScanner.saveMetadataForLocalExtension(local, metadata);
+		}
+		return local;
+	}
+
+	private async installDependenciesAndPackExtensions(installed: ILocalExtension, existing: ILocalExtension | undefined, options: InstallOptions): Promise<void> {
+		if (!this.galleryService.isEnabled()) {
+			return;
+		}
+		const dependenciesAndPackExtensions: string[] = installed.manifest.extensionDependencies || [];
+		if (installed.manifest.extensionPack) {
+			for (const extension of installed.manifest.extensionPack) {
+				// add only those extensions which are new in currently installed extension
+				if (!(existing && existing.manifest.extensionPack && existing.manifest.extensionPack.some(old => areSameExtensions({ id: old }, { id: extension })))) {
+					if (dependenciesAndPackExtensions.every(e => !areSameExtensions({ id: e }, { id: extension }))) {
+						dependenciesAndPackExtensions.push(extension);
+					}
+				}
+			}
+		}
+		if (dependenciesAndPackExtensions.length) {
+			const installed = await this.getInstalled();
+			// filter out installed extensions
+			const names = dependenciesAndPackExtensions.filter(id => installed.every(({ identifier: galleryIdentifier }) => !areSameExtensions(galleryIdentifier, { id })));
+			if (names.length) {
+				const galleryResult = await this.galleryService.query({ names, pageSize: dependenciesAndPackExtensions.length }, CancellationToken.None);
+				const extensionsToInstall = galleryResult.firstPage;
+				try {
+					await Promises.settled(extensionsToInstall.map(e => this.installFromGallery(e, options)));
+				} catch (error) {
+					try { await this.rollback(extensionsToInstall); } catch (e) { /* ignore */ }
+					throw error;
+				}
+			}
+		}
+	}
+
+	private async rollback(extensions: IGalleryExtension[]): Promise<void> {
+		const installed = await this.getInstalled(ExtensionType.User);
+		const extensionsToUninstall = installed.filter(local => extensions.some(galleryExtension => new ExtensionIdentifierWithVersion(local.identifier, local.manifest.version).equals(new ExtensionIdentifierWithVersion(galleryExtension.identifier, galleryExtension.version)))); // Check with version because we want to rollback the exact version
+		await Promises.settled(extensionsToUninstall.map(local => this.uninstall(local)));
+	}
+
+	async uninstall(extension: ILocalExtension, options: UninstallOptions = {}): Promise<void> {
 		this.logService.trace('ExtensionManagementService#uninstall', extension.identifier.id);
-		return this.toNonCancellablePromise(this.getInstalled(LocalExtensionType.User)
-			.then(installed => {
-				const extensionsToUninstall = installed
-					.filter(e => e.manifest.publisher === extension.manifest.publisher && e.manifest.name === extension.manifest.name);
-				if (extensionsToUninstall.length) {
-					const promises = extensionsToUninstall.map(e => this.checkForDependenciesAndUninstall(e, installed));
-					return Promise.all(promises).then(() => null, error => Promise.reject(this.joinErrors(error)));
-				} else {
-					return Promise.reject(new Error(nls.localize('notInstalled', "Extension '{0}' is not installed.", extension.manifest.displayName || extension.manifest.name)));
-				}
-			}));
+		const installed = await this.getInstalled(ExtensionType.User);
+		const extensionToUninstall = installed.find(e => areSameExtensions(e.identifier, extension.identifier));
+		if (!extensionToUninstall) {
+			throw new Error(nls.localize('notInstalled', "Extension '{0}' is not installed.", extension.manifest.displayName || extension.manifest.name));
+		}
+
+		try {
+			await this.checkForDependenciesAndUninstall(extensionToUninstall, installed, options);
+		} catch (error) {
+			throw this.joinErrors(error);
+		}
 	}
 
-	updateMetadata(local: ILocalExtension, metadata: IGalleryMetadata): Promise<ILocalExtension> {
+	async updateMetadata(local: ILocalExtension, metadata: IGalleryMetadata): Promise<ILocalExtension> {
 		this.logService.trace('ExtensionManagementService#updateMetadata', local.identifier.id);
-		local.metadata = metadata;
-		return this.saveMetadataForLocalExtension(local)
-			.then(localExtension => {
-				this.manifestCache.invalidate();
-				return localExtension;
-			});
+		local = await this.extensionsScanner.saveMetadataForLocalExtension(local, { ...((<ILocalExtensionManifest>local.manifest).__metadata || {}), ...metadata });
+		this.manifestCache.invalidate();
+		return local;
 	}
 
-	private saveMetadataForLocalExtension(local: ILocalExtension): Promise<ILocalExtension> {
-		if (!local.metadata) {
-			return Promise.resolve(local);
-		}
-		const manifestPath = path.join(this.extensionsPath, local.identifier.id, 'package.json');
-		return pfs.readFile(manifestPath, 'utf8')
-			.then(raw => parseManifest(raw))
-			.then(({ manifest }) => assign(manifest, { __metadata: local.metadata }))
-			.then(manifest => pfs.writeFile(manifestPath, JSON.stringify(manifest, null, '\t')))
-			.then(() => local);
+	async updateExtensionScope(local: ILocalExtension, isMachineScoped: boolean): Promise<ILocalExtension> {
+		this.logService.trace('ExtensionManagementService#updateExtensionScope', local.identifier.id);
+		local = await this.extensionsScanner.saveMetadataForLocalExtension(local, { ...((<ILocalExtensionManifest>local.manifest).__metadata || {}), isMachineScoped });
+		this.manifestCache.invalidate();
+		return local;
 	}
 
-	private getMetadata(extensionName: string): Promise<IGalleryMetadata> {
-		return this.findGalleryExtensionByName(extensionName)
-			.then(galleryExtension => galleryExtension ? <IGalleryMetadata>{ id: galleryExtension.identifier.uuid, publisherDisplayName: galleryExtension.publisherDisplayName, publisherId: galleryExtension.publisherId } : null);
+	private async getGalleryMetadata(extensionName: string): Promise<IGalleryMetadata | undefined> {
+		const galleryExtension = await this.findGalleryExtensionByName(extensionName);
+		return galleryExtension ? <IGalleryMetadata>{ id: galleryExtension.identifier.uuid, publisherDisplayName: galleryExtension.publisherDisplayName, publisherId: galleryExtension.publisherId } : undefined;
 	}
 
-	private findGalleryExtension(local: ILocalExtension): Promise<IGalleryExtension> {
+	private async findGalleryExtension(local: ILocalExtension): Promise<IGalleryExtension> {
 		if (local.identifier.uuid) {
-			return this.findGalleryExtensionById(local.identifier.uuid)
-				.then(galleryExtension => galleryExtension ? galleryExtension : this.findGalleryExtensionByName(getGalleryExtensionIdFromLocal(local)));
+			const galleryExtension = await this.findGalleryExtensionById(local.identifier.uuid);
+			return galleryExtension ? galleryExtension : this.findGalleryExtensionByName(local.identifier.id);
 		}
-		return this.findGalleryExtensionByName(getGalleryExtensionIdFromLocal(local));
+		return this.findGalleryExtensionByName(local.identifier.id);
 	}
 
-	private findGalleryExtensionById(uuid: string): Promise<IGalleryExtension> {
-		return this.galleryService.query({ ids: [uuid], pageSize: 1 }).then(galleryResult => galleryResult.firstPage[0]);
+	private async findGalleryExtensionById(uuid: string): Promise<IGalleryExtension> {
+		const galleryResult = await this.galleryService.query({ ids: [uuid], pageSize: 1 }, CancellationToken.None);
+		return galleryResult.firstPage[0];
 	}
 
-	private findGalleryExtensionByName(name: string): Promise<IGalleryExtension> {
-		return this.galleryService.query({ names: [name], pageSize: 1 }).then(galleryResult => galleryResult.firstPage[0]);
+	private async findGalleryExtensionByName(name: string): Promise<IGalleryExtension> {
+		const galleryResult = await this.galleryService.query({ names: [name], pageSize: 1 }, CancellationToken.None);
+		return galleryResult.firstPage[0];
 	}
 
-	private joinErrors(errorOrErrors: (Error | string) | ((Error | string)[])): Error {
+	private joinErrors(errorOrErrors: (Error | string) | (Array<Error | string>)): Error {
 		const errors = Array.isArray(errorOrErrors) ? errorOrErrors : [errorOrErrors];
 		if (errors.length === 1) {
 			return errors[0] instanceof Error ? <Error>errors[0] : new Error(<string>errors[0]);
@@ -606,44 +537,65 @@ export class ExtensionManagementService extends Disposable implements IExtension
 		}, new Error(''));
 	}
 
-	private checkForDependenciesAndUninstall(extension: ILocalExtension, installed: ILocalExtension[]): Promise<void> {
-		return this.preUninstallExtension(extension)
-			.then(() => {
-				const packedExtensions = this.getAllPackExtensionsToUninstall(extension, installed);
-				if (packedExtensions.length) {
-					return this.uninstallExtensions(extension, packedExtensions, installed);
-				}
-				return this.uninstallExtensions(extension, [], installed);
-			})
-			.then(() => this.postUninstallExtension(extension),
-				error => {
-					this.postUninstallExtension(extension, new ExtensionManagementError(error instanceof Error ? error.message : error, INSTALL_ERROR_LOCAL));
-					return Promise.reject(error);
-				});
+	private async checkForDependenciesAndUninstall(extension: ILocalExtension, installed: ILocalExtension[], options: UninstallOptions): Promise<void> {
+		try {
+			await this.preUninstallExtension(extension);
+			const packedExtensions = options.donotIncludePack ? [] : this.getAllPackExtensionsToUninstall(extension, installed);
+			await this.uninstallExtensions(extension, packedExtensions, installed, options);
+		} catch (error) {
+			await this.postUninstallExtension(extension, new ExtensionManagementError(error instanceof Error ? error.message : error, INSTALL_ERROR_LOCAL));
+			throw error;
+		}
+		await this.postUninstallExtension(extension);
 	}
 
-	private uninstallExtensions(extension: ILocalExtension, otherExtensionsToUninstall: ILocalExtension[], installed: ILocalExtension[]): Promise<void> {
-		const dependents = this.getDependents(extension, installed);
-		if (dependents.length) {
-			const remainingDependents = dependents.filter(dependent => extension !== dependent && otherExtensionsToUninstall.indexOf(dependent) === -1);
-			if (remainingDependents.length) {
-				return Promise.reject(new Error(this.getDependentsErrorMessage(extension, remainingDependents)));
+	private async uninstallExtensions(extension: ILocalExtension, otherExtensionsToUninstall: ILocalExtension[], installed: ILocalExtension[], options: UninstallOptions): Promise<void> {
+		const extensionsToUninstall = [extension, ...otherExtensionsToUninstall];
+		if (!options.donotCheckDependents) {
+			for (const e of extensionsToUninstall) {
+				this.checkForDependents(e, extensionsToUninstall, installed, extension);
 			}
 		}
-		return Promise.all([this.uninstallExtension(extension), ...otherExtensionsToUninstall.map(d => this.doUninstall(d))]).then(() => null);
+		await Promises.settled([this.uninstallExtension(extension), ...otherExtensionsToUninstall.map(d => this.doUninstall(d))]);
 	}
 
-	private getDependentsErrorMessage(extension: ILocalExtension, dependents: ILocalExtension[]): string {
+	private checkForDependents(extension: ILocalExtension, extensionsToUninstall: ILocalExtension[], installed: ILocalExtension[], extensionToUninstall: ILocalExtension): void {
+		const dependents = this.getDependents(extension, installed);
+		if (dependents.length) {
+			const remainingDependents = dependents.filter(dependent => extensionsToUninstall.indexOf(dependent) === -1);
+			if (remainingDependents.length) {
+				throw new Error(this.getDependentsErrorMessage(extension, remainingDependents, extensionToUninstall));
+			}
+		}
+	}
+
+	private getDependentsErrorMessage(dependingExtension: ILocalExtension, dependents: ILocalExtension[], extensionToUninstall: ILocalExtension): string {
+		if (extensionToUninstall === dependingExtension) {
+			if (dependents.length === 1) {
+				return nls.localize('singleDependentError', "Cannot uninstall '{0}' extension. '{1}' extension depends on this.",
+					extensionToUninstall.manifest.displayName || extensionToUninstall.manifest.name, dependents[0].manifest.displayName || dependents[0].manifest.name);
+			}
+			if (dependents.length === 2) {
+				return nls.localize('twoDependentsError', "Cannot uninstall '{0}' extension. '{1}' and '{2}' extensions depend on this.",
+					extensionToUninstall.manifest.displayName || extensionToUninstall.manifest.name, dependents[0].manifest.displayName || dependents[0].manifest.name, dependents[1].manifest.displayName || dependents[1].manifest.name);
+			}
+			return nls.localize('multipleDependentsError', "Cannot uninstall '{0}' extension. '{1}', '{2}' and other extension depend on this.",
+				extensionToUninstall.manifest.displayName || extensionToUninstall.manifest.name, dependents[0].manifest.displayName || dependents[0].manifest.name, dependents[1].manifest.displayName || dependents[1].manifest.name);
+		}
 		if (dependents.length === 1) {
-			return nls.localize('singleDependentError', "Cannot uninstall extension '{0}'. Extension '{1}' depends on this.",
-				extension.manifest.displayName || extension.manifest.name, dependents[0].manifest.displayName || dependents[0].manifest.name);
+			return nls.localize('singleIndirectDependentError', "Cannot uninstall '{0}' extension . It includes uninstalling '{1}' extension and '{2}' extension depends on this.",
+				extensionToUninstall.manifest.displayName || extensionToUninstall.manifest.name, dependingExtension.manifest.displayName
+			|| dependingExtension.manifest.name, dependents[0].manifest.displayName || dependents[0].manifest.name);
 		}
 		if (dependents.length === 2) {
-			return nls.localize('twoDependentsError', "Cannot uninstall extension '{0}'. Extensions '{1}' and '{2}' depend on this.",
-				extension.manifest.displayName || extension.manifest.name, dependents[0].manifest.displayName || dependents[0].manifest.name, dependents[1].manifest.displayName || dependents[1].manifest.name);
+			return nls.localize('twoIndirectDependentsError', "Cannot uninstall '{0}' extension. It includes uninstalling '{1}' extension and '{2}' and '{3}' extensions depend on this.",
+				extensionToUninstall.manifest.displayName || extensionToUninstall.manifest.name, dependingExtension.manifest.displayName
+			|| dependingExtension.manifest.name, dependents[0].manifest.displayName || dependents[0].manifest.name, dependents[1].manifest.displayName || dependents[1].manifest.name);
 		}
-		return nls.localize('multipleDependentsError', "Cannot uninstall extension '{0}'. Extensions '{1}', '{2}' and others depend on this.",
-			extension.manifest.displayName || extension.manifest.name, dependents[0].manifest.displayName || dependents[0].manifest.name, dependents[1].manifest.displayName || dependents[1].manifest.name);
+		return nls.localize('multipleIndirectDependentsError', "Cannot uninstall '{0}' extension. It includes uninstalling '{1}' extension and '{2}', '{3}' and other extensions depend on this.",
+			extensionToUninstall.manifest.displayName || extensionToUninstall.manifest.name, dependingExtension.manifest.displayName
+		|| dependingExtension.manifest.name, dependents[0].manifest.displayName || dependents[0].manifest.name, dependents[1].manifest.displayName || dependents[1].manifest.name);
+
 	}
 
 	private getAllPackExtensionsToUninstall(extension: ILocalExtension, installed: ILocalExtension[], checked: ILocalExtension[] = []): ILocalExtension[] {
@@ -651,49 +603,52 @@ export class ExtensionManagementService extends Disposable implements IExtension
 			return [];
 		}
 		checked.push(extension);
-		if (!extension.manifest.extensionPack || extension.manifest.extensionPack.length === 0) {
-			return [];
+		const extensionsPack = extension.manifest.extensionPack ? extension.manifest.extensionPack : [];
+		if (extensionsPack.length) {
+			const packedExtensions = installed.filter(i => !i.isBuiltin && extensionsPack.some(id => areSameExtensions({ id }, i.identifier)));
+			const packOfPackedExtensions: ILocalExtension[] = [];
+			for (const packedExtension of packedExtensions) {
+				packOfPackedExtensions.push(...this.getAllPackExtensionsToUninstall(packedExtension, installed, checked));
+			}
+			return [...packedExtensions, ...packOfPackedExtensions];
 		}
-		const packedExtensions = installed.filter(i => extension.manifest.extensionPack.some(id => areSameExtensions({ id }, i.galleryIdentifier)));
-		const packOfPackedExtensions = [];
-		for (const packedExtension of packedExtensions) {
-			packOfPackedExtensions.push(...this.getAllPackExtensionsToUninstall(packedExtension, installed, checked));
-		}
-		return [...packedExtensions, ...packOfPackedExtensions];
+		return [];
 	}
 
 	private getDependents(extension: ILocalExtension, installed: ILocalExtension[]): ILocalExtension[] {
-		return installed.filter(e => e.manifest.extensionDependencies && e.manifest.extensionDependencies.some(id => areSameExtensions({ id }, extension.galleryIdentifier)));
+		return installed.filter(e => e.manifest.extensionDependencies && e.manifest.extensionDependencies.some(id => areSameExtensions({ id }, extension.identifier)));
 	}
 
-	private doUninstall(extension: ILocalExtension): Promise<void> {
-		return this.preUninstallExtension(extension)
-			.then(() => this.uninstallExtension(extension))
-			.then(() => this.postUninstallExtension(extension),
-				error => {
-					this.postUninstallExtension(extension, new ExtensionManagementError(error instanceof Error ? error.message : error, INSTALL_ERROR_LOCAL));
-					return Promise.reject(error);
-				});
+	private async doUninstall(extension: ILocalExtension): Promise<void> {
+		try {
+			await this.preUninstallExtension(extension);
+			await this.uninstallExtension(extension);
+		} catch (error) {
+			await this.postUninstallExtension(extension, new ExtensionManagementError(error instanceof Error ? error.message : error, INSTALL_ERROR_LOCAL));
+			throw error;
+		}
+		await this.postUninstallExtension(extension);
 	}
 
-	private preUninstallExtension(extension: ILocalExtension): Promise<void> {
-		return pfs.exists(extension.location.fsPath)
-			.then(exists => exists ? null : Promise.reject(new Error(nls.localize('notExists', "Could not find extension"))))
-			.then(() => {
-				this.logService.info('Uninstalling extension:', extension.identifier.id);
-				this._onUninstallExtension.fire(extension.identifier);
-			});
+	private async preUninstallExtension(extension: ILocalExtension): Promise<void> {
+		const exists = await pfs.exists(extension.location.fsPath);
+		if (!exists) {
+			throw new Error(nls.localize('notExists', "Could not find extension"));
+		}
+		this.logService.info('Uninstalling extension:', extension.identifier.id);
+		this._onUninstallExtension.fire(extension.identifier);
 	}
 
-	private uninstallExtension(local: ILocalExtension): Promise<void> {
-		const id = getGalleryExtensionIdFromLocal(local);
-		let promise = this.uninstallingExtensions.get(id);
+	private async uninstallExtension(local: ILocalExtension): Promise<void> {
+		let promise = this.uninstallingExtensions.get(local.identifier.id);
 		if (!promise) {
 			// Set all versions of the extension as uninstalled
-			promise = createCancelablePromise(token => this.scanUserExtensions(false)
-				.then(userExtensions => this.setUninstalled(...userExtensions.filter(u => areSameExtensions({ id: getGalleryExtensionIdFromLocal(u), uuid: u.identifier.uuid }, { id, uuid: local.identifier.uuid }))))
-				.then(() => { this.uninstallingExtensions.delete(id); }));
-			this.uninstallingExtensions.set(id, promise);
+			promise = createCancelablePromise(async () => {
+				const userExtensions = await this.extensionsScanner.scanUserExtensions(false);
+				await this.setUninstalled(...userExtensions.filter(u => areSameExtensions(u.identifier, local.identifier)));
+			});
+			this.uninstallingExtensions.set(local.identifier.id, promise);
+			promise.finally(() => this.uninstallingExtensions.delete(local.identifier.id));
 		}
 		return promise;
 	}
@@ -705,168 +660,51 @@ export class ExtensionManagementService extends Disposable implements IExtension
 			this.logService.info('Successfully uninstalled extension:', extension.identifier.id);
 			// only report if extension has a mapped gallery extension. UUID identifies the gallery extension.
 			if (extension.identifier.uuid) {
-				await this.galleryService.reportStatistic(extension.manifest.publisher, extension.manifest.name, extension.manifest.version, StatisticType.Uninstall);
+				try {
+					await this.galleryService.reportStatistic(extension.manifest.publisher, extension.manifest.name, extension.manifest.version, StatisticType.Uninstall);
+				} catch (error) { /* ignore */ }
 			}
 		}
-		this.reportTelemetry('extensionGallery:uninstall', getLocalExtensionTelemetryData(extension), void 0, error);
-		const errorcode = error ? error instanceof ExtensionManagementError ? error.code : ERROR_UNKNOWN : void 0;
+		this.reportTelemetry('extensionGallery:uninstall', getLocalExtensionTelemetryData(extension), undefined, error);
+		const errorcode = error ? error instanceof ExtensionManagementError ? error.code : ERROR_UNKNOWN : undefined;
 		this._onDidUninstallExtension.fire({ identifier: extension.identifier, error: errorcode });
 	}
 
-	getInstalled(type: LocalExtensionType = null): Promise<ILocalExtension[]> {
-		const promises = [];
-
-		if (type === null || type === LocalExtensionType.System) {
-			promises.push(this.scanSystemExtensions().then(null, e => new ExtensionManagementError(this.joinErrors(e).message, ERROR_SCANNING_SYS_EXTENSIONS)));
-		}
-
-		if (type === null || type === LocalExtensionType.User) {
-			promises.push(this.scanUserExtensions(true).then(null, e => new ExtensionManagementError(this.joinErrors(e).message, ERROR_SCANNING_USER_EXTENSIONS)));
-		}
-
-		return Promise.all<ILocalExtension[]>(promises).then(flatten, errors => Promise.reject(this.joinErrors(errors)));
+	getInstalled(type: ExtensionType | null = null): Promise<ILocalExtension[]> {
+		return this.extensionsScanner.scanExtensions(type);
 	}
 
-	private scanSystemExtensions(): Promise<ILocalExtension[]> {
-		this.logService.trace('Started scanning system extensions');
-		return this.scanExtensions(this.systemExtensionsPath, LocalExtensionType.System)
-			.then(result => {
-				this.logService.info('Scanned system extensions:', result.length);
-				return result;
-			});
+	removeDeprecatedExtensions(): Promise<void> {
+		return this.extensionsScanner.cleanUp();
 	}
 
-	private scanUserExtensions(excludeOutdated: boolean): Promise<ILocalExtension[]> {
-		this.logService.trace('Started scanning user extensions');
-		return Promise.all([this.getUninstalledExtensions(), this.scanExtensions(this.extensionsPath, LocalExtensionType.User)])
-			.then(([uninstalled, extensions]) => {
-				extensions = extensions.filter(e => !uninstalled[e.identifier.id]);
-				if (excludeOutdated) {
-					const byExtension: ILocalExtension[][] = groupByExtension(extensions, e => ({ id: getGalleryExtensionIdFromLocal(e), uuid: e.identifier.uuid }));
-					extensions = byExtension.map(p => p.sort((a, b) => semver.rcompare(a.manifest.version, b.manifest.version))[0]);
-				}
-				this.logService.info('Scanned user extensions:', extensions.length);
-				return extensions;
-			});
+	private async isUninstalled(identifier: ExtensionIdentifierWithVersion): Promise<boolean> {
+		const uninstalled = await this.filterUninstalled(identifier);
+		return uninstalled.length === 1;
 	}
 
-	private scanExtensions(root: string, type: LocalExtensionType): Promise<ILocalExtension[]> {
-		const limiter = new Limiter(10);
-		return pfs.readdir(root)
-			.then(extensionsFolders => Promise.all<ILocalExtension>(extensionsFolders.map(extensionFolder => limiter.queue(() => this.scanExtension(extensionFolder, root, type)))))
-			.then(extensions => extensions.filter(e => e && e.identifier));
-	}
-
-	private scanExtension(folderName: string, root: string, type: LocalExtensionType): Promise<ILocalExtension> {
-		if (type === LocalExtensionType.User && folderName.indexOf('.') === 0) { // Do not consider user exension folder starting with `.`
-			return Promise.resolve(null);
-		}
-		const extensionPath = path.join(root, folderName);
-		return pfs.readdir(extensionPath)
-			.then(children => readManifest(extensionPath)
-				.then<ILocalExtension>(({ manifest, metadata }) => {
-					const readme = children.filter(child => /^readme(\.txt|\.md|)$/i.test(child))[0];
-					const readmeUrl = readme ? URI.file(path.join(extensionPath, readme)).toString() : null;
-					const changelog = children.filter(child => /^changelog(\.txt|\.md|)$/i.test(child))[0];
-					const changelogUrl = changelog ? URI.file(path.join(extensionPath, changelog)).toString() : null;
-					if (manifest.extensionDependencies) {
-						manifest.extensionDependencies = manifest.extensionDependencies.map(id => adoptToGalleryExtensionId(id));
-					}
-					if (manifest.extensionPack) {
-						manifest.extensionPack = manifest.extensionPack.map(id => adoptToGalleryExtensionId(id));
-					}
-					const identifier = { id: type === LocalExtensionType.System ? folderName : getLocalExtensionIdFromManifest(manifest), uuid: metadata ? metadata.id : null };
-					const galleryIdentifier = { id: getGalleryExtensionId(manifest.publisher, manifest.name), uuid: identifier.uuid };
-					return { type, identifier, galleryIdentifier, manifest, metadata, location: URI.file(extensionPath), readmeUrl, changelogUrl };
-				}))
-			.then(null, () => null);
-	}
-
-	removeDeprecatedExtensions(): Promise<any> {
-		return this.removeUninstalledExtensions()
-			.then(() => this.removeOutdatedExtensions());
-	}
-
-	private removeUninstalledExtensions(): Promise<void> {
-		return this.getUninstalledExtensions()
-			.then(uninstalled => this.scanExtensions(this.extensionsPath, LocalExtensionType.User) // All user extensions
-				.then(extensions => {
-					const toRemove: ILocalExtension[] = extensions.filter(e => uninstalled[e.identifier.id]);
-					return Promise.all(toRemove.map(e => this.extensionLifecycle.uninstall(e).then(() => this.removeUninstalledExtension(e))));
-				})
-			).then(() => null);
-	}
-
-	private removeOutdatedExtensions(): Promise<void> {
-		return this.scanExtensions(this.extensionsPath, LocalExtensionType.User) // All user extensions
-			.then(extensions => {
-				const toRemove: ILocalExtension[] = [];
-
-				// Outdated extensions
-				const byExtension: ILocalExtension[][] = groupByExtension(extensions, e => ({ id: getGalleryExtensionIdFromLocal(e), uuid: e.identifier.uuid }));
-				toRemove.push(...flatten(byExtension.map(p => p.sort((a, b) => semver.rcompare(a.manifest.version, b.manifest.version)).slice(1))));
-
-				return Promise.all(toRemove.map(extension => this.removeExtension(extension, 'outdated')));
-			}).then(() => null);
-	}
-
-	private removeUninstalledExtension(extension: ILocalExtension): Promise<void> {
-		return this.removeExtension(extension, 'uninstalled')
-			.then(() => this.withUninstalledExtensions(uninstalled => delete uninstalled[extension.identifier.id]))
-			.then(() => null);
-	}
-
-	private removeExtension(extension: ILocalExtension, type: string): Promise<void> {
-		this.logService.trace(`Deleting ${type} extension from disk`, extension.identifier.id);
-		return pfs.rimraf(extension.location.fsPath).then(() => this.logService.info('Deleted from disk', extension.identifier.id));
-	}
-
-	private isUninstalled(id: string): Promise<boolean> {
-		return this.filterUninstalled(id).then(uninstalled => uninstalled.length === 1);
-	}
-
-	private filterUninstalled(...ids: string[]): Promise<string[]> {
-		return this.withUninstalledExtensions(allUninstalled => {
-			const uninstalled = [];
-			for (const id of ids) {
-				if (!!allUninstalled[id]) {
-					uninstalled.push(id);
+	private filterUninstalled(...identifiers: ExtensionIdentifierWithVersion[]): Promise<string[]> {
+		return this.extensionsScanner.withUninstalledExtensions(allUninstalled => {
+			const uninstalled: string[] = [];
+			for (const identifier of identifiers) {
+				if (!!allUninstalled[identifier.key()]) {
+					uninstalled.push(identifier.key());
 				}
 			}
 			return uninstalled;
 		});
 	}
 
-	private setUninstalled(...extensions: ILocalExtension[]): Promise<void> {
-		const ids = extensions.map(e => e.identifier.id);
-		return this.withUninstalledExtensions(uninstalled => assign(uninstalled, ids.reduce((result, id) => { result[id] = true; return result; }, {})));
-	}
-
-	private unsetUninstalled(id: string): Promise<void> {
-		return this.withUninstalledExtensions<void>(uninstalled => delete uninstalled[id]);
-	}
-
-	private getUninstalledExtensions(): Promise<{ [id: string]: boolean; }> {
-		return this.withUninstalledExtensions(uninstalled => uninstalled);
-	}
-
-	private async withUninstalledExtensions<T>(fn: (uninstalled: { [id: string]: boolean; }) => T): Promise<T> {
-		return await this.uninstalledFileLimiter.queue(() => {
-			let result: T = null;
-			return pfs.readFile(this.uninstalledPath, 'utf8')
-				.then(null, err => err.code === 'ENOENT' ? Promise.resolve('{}') : Promise.reject(err))
-				.then<{ [id: string]: boolean }>(raw => { try { return JSON.parse(raw); } catch (e) { return {}; } })
-				.then(uninstalled => { result = fn(uninstalled); return uninstalled; })
-				.then(uninstalled => {
-					if (Object.keys(uninstalled).length === 0) {
-						return pfs.rimraf(this.uninstalledPath);
-					} else {
-						const raw = JSON.stringify(uninstalled);
-						return pfs.writeFile(this.uninstalledPath, raw);
-					}
-				})
-				.then(() => result);
+	private setUninstalled(...extensions: ILocalExtension[]): Promise<{ [id: string]: boolean }> {
+		const ids: ExtensionIdentifierWithVersion[] = extensions.map(e => new ExtensionIdentifierWithVersion(e.identifier, e.manifest.version));
+		return this.extensionsScanner.withUninstalledExtensions(uninstalled => {
+			ids.forEach(id => uninstalled[id.key()] = true);
+			return uninstalled;
 		});
+	}
+
+	private unsetUninstalled(extensionIdentifier: ExtensionIdentifierWithVersion): Promise<void> {
+		return this.extensionsScanner.withUninstalledExtensions<void>(uninstalled => delete uninstalled[extensionIdentifier.key()]);
 	}
 
 	getExtensionsReport(): Promise<IReportedExtension[]> {
@@ -880,25 +718,20 @@ export class ExtensionManagementService extends Disposable implements IExtension
 		return this.reportedExtensions;
 	}
 
-	private updateReportCache(): Promise<IReportedExtension[]> {
-		this.logService.trace('ExtensionManagementService.refreshReportedCache');
-
-		return this.galleryService.getExtensionsReport()
-			.then(result => {
-				this.logService.trace(`ExtensionManagementService.refreshReportedCache - got ${result.length} reported extensions from service`);
-				return result;
-			}, err => {
-				this.logService.trace('ExtensionManagementService.refreshReportedCache - failed to get extension report');
-				return [];
-			});
+	private async updateReportCache(): Promise<IReportedExtension[]> {
+		try {
+			this.logService.trace('ExtensionManagementService.refreshReportedCache');
+			const result = await this.galleryService.getExtensionsReport();
+			this.logService.trace(`ExtensionManagementService.refreshReportedCache - got ${result.length} reported extensions from service`);
+			return result;
+		} catch (err) {
+			this.logService.trace('ExtensionManagementService.refreshReportedCache - failed to get extension report');
+			return [];
+		}
 	}
 
-	private toNonCancellablePromise<T>(promise: Promise<T>): Promise<T> {
-		return new Promise((c, e) => promise.then(result => c(result), error => e(error)));
-	}
-
-	private reportTelemetry(eventName: string, extensionData: any, duration: number, error?: Error): void {
-		const errorcode = error ? error instanceof ExtensionManagementError ? error.code : ERROR_UNKNOWN : void 0;
+	private reportTelemetry(eventName: string, extensionData: any, duration?: number, error?: Error): void {
+		const errorcode = error ? error instanceof ExtensionManagementError ? error.code : ERROR_UNKNOWN : undefined;
 		/* __GDPR__
 			"extensionGallery:install" : {
 				"success": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true },
@@ -930,14 +763,6 @@ export class ExtensionManagementService extends Disposable implements IExtension
 				]
 			}
 		*/
-		this.telemetryService.publicLog(eventName, assign(extensionData, { success: !error, duration, errorcode }));
+		this.telemetryService.publicLogError(eventName, { ...extensionData, success: !error, duration, errorcode });
 	}
-}
-
-export function getLocalExtensionIdFromGallery(extension: IGalleryExtension, version: string): string {
-	return getLocalExtensionId(extension.identifier.id, version);
-}
-
-export function getLocalExtensionIdFromManifest(manifest: IExtensionManifest): string {
-	return getLocalExtensionId(getGalleryExtensionId(manifest.publisher, manifest.name), manifest.version);
 }

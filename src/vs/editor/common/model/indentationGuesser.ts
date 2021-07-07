@@ -7,8 +7,8 @@ import { CharCode } from 'vs/base/common/charCode';
 import { ITextBuffer } from 'vs/editor/common/model';
 
 class SpacesDiffResult {
-	public spacesDiff: number;
-	public looksLikeAlignment: boolean;
+	public spacesDiff: number = 0;
+	public looksLikeAlignment: boolean = false;
 }
 
 /**
@@ -72,11 +72,12 @@ function spacesDiff(a: string, aLength: number, b: string, bLength: number, resu
 
 		if (spacesDiff > 0 && 0 <= bSpacesCnt - 1 && bSpacesCnt - 1 < a.length && bSpacesCnt < b.length) {
 			if (b.charCodeAt(bSpacesCnt) !== CharCode.Space && a.charCodeAt(bSpacesCnt - 1) === CharCode.Space) {
-				// This looks like an alignment desire: e.g.
-				// const a = b + c,
-				//       d = b - c;
-
-				result.looksLikeAlignment = true;
+				if (a.charCodeAt(a.length - 1) === CharCode.Comma) {
+					// This looks like an alignment desire: e.g.
+					// const a = b + c,
+					//       d = b - c;
+					result.looksLikeAlignment = true;
+				}
 			}
 		}
 		return;
@@ -111,8 +112,8 @@ export function guessIndentation(source: ITextBuffer, defaultTabSize: number, de
 	let previousLineText = '';						// content of latest line that contained non-whitespace chars
 	let previousLineIndentation = 0;				// index at which latest line contained the first non-whitespace char
 
-	const ALLOWED_TAB_SIZE_GUESSES = [2, 4, 6, 8];	// limit guesses for `tabSize` to 2, 4, 6 or 8.
-	const MAX_ALLOWED_TAB_SIZE_GUESS = 8;			// max(2,4,6,8) = 8
+	const ALLOWED_TAB_SIZE_GUESSES = [2, 4, 6, 8, 3, 5, 7];	// prefer even guesses for `tabSize`, limit to [2, 8].
+	const MAX_ALLOWED_TAB_SIZE_GUESS = 8;			// max(ALLOWED_TAB_SIZE_GUESSES) = 8
 
 	let spacesDiffCount = [0, 0, 0, 0, 0, 0, 0, 0, 0];		// `tabSize` scores
 	let tmp = new SpacesDiffResult();
@@ -158,8 +159,19 @@ export function guessIndentation(source: ITextBuffer, defaultTabSize: number, de
 		spacesDiff(previousLineText, previousLineIndentation, currentLineText, currentLineIndentation, tmp);
 
 		if (tmp.looksLikeAlignment) {
-			// skip this line entirely
-			continue;
+			// if defaultInsertSpaces === true && the spaces count == tabSize, we may want to count it as valid indentation
+			//
+			// - item1
+			//   - item2
+			//
+			// otherwise skip this line entirely
+			//
+			// const a = 1,
+			//       b = 2;
+
+			if (!(defaultInsertSpaces && defaultTabSize === tmp.spacesDiff)) {
+				continue;
+			}
 		}
 
 		let currentSpacesDiff = tmp.spacesDiff;
@@ -177,17 +189,27 @@ export function guessIndentation(source: ITextBuffer, defaultTabSize: number, de
 	}
 
 	let tabSize = defaultTabSize;
-	let tabSizeScore = (insertSpaces ? 0 : 0.1 * linesCount);
 
-	// console.log("score threshold: " + tabSizeScore);
+	// Guess tabSize only if inserting spaces...
+	if (insertSpaces) {
+		let tabSizeScore = (insertSpaces ? 0 : 0.1 * linesCount);
 
-	ALLOWED_TAB_SIZE_GUESSES.forEach((possibleTabSize) => {
-		let possibleTabSizeScore = spacesDiffCount[possibleTabSize];
-		if (possibleTabSizeScore > tabSizeScore) {
-			tabSizeScore = possibleTabSizeScore;
-			tabSize = possibleTabSize;
+		// console.log("score threshold: " + tabSizeScore);
+
+		ALLOWED_TAB_SIZE_GUESSES.forEach((possibleTabSize) => {
+			let possibleTabSizeScore = spacesDiffCount[possibleTabSize];
+			if (possibleTabSizeScore > tabSizeScore) {
+				tabSizeScore = possibleTabSizeScore;
+				tabSize = possibleTabSize;
+			}
+		});
+
+		// Let a tabSize of 2 win even if it is not the maximum
+		// (only in case 4 was guessed)
+		if (tabSize === 4 && spacesDiffCount[4] > 0 && spacesDiffCount[2] > 0 && spacesDiffCount[2] >= spacesDiffCount[4] / 2) {
+			tabSize = 2;
 		}
-	});
+	}
 
 
 	// console.log('--------------------------');

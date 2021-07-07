@@ -4,44 +4,44 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 Object.defineProperty(exports, "__esModule", { value: true });
-var es = require("event-stream");
-var util = require("gulp-util");
-var appInsights = require("applicationinsights");
-var Entry = /** @class */ (function () {
-    function Entry(name, totalCount, totalSize) {
+exports.submitAllStats = exports.createStatsStream = void 0;
+const es = require("event-stream");
+const fancyLog = require("fancy-log");
+const ansiColors = require("ansi-colors");
+class Entry {
+    constructor(name, totalCount, totalSize) {
         this.name = name;
         this.totalCount = totalCount;
         this.totalSize = totalSize;
     }
-    Entry.prototype.toString = function (pretty) {
+    toString(pretty) {
         if (!pretty) {
             if (this.totalCount === 1) {
-                return this.name + ": " + this.totalSize + " bytes";
+                return `${this.name}: ${this.totalSize} bytes`;
             }
             else {
-                return this.name + ": " + this.totalCount + " files with " + this.totalSize + " bytes";
+                return `${this.name}: ${this.totalCount} files with ${this.totalSize} bytes`;
             }
         }
         else {
             if (this.totalCount === 1) {
-                return "Stats for '" + util.colors.grey(this.name) + "': " + Math.round(this.totalSize / 1204) + "KB";
+                return `Stats for '${ansiColors.grey(this.name)}': ${Math.round(this.totalSize / 1204)}KB`;
             }
             else {
-                var count = this.totalCount < 100
-                    ? util.colors.green(this.totalCount.toString())
-                    : util.colors.red(this.totalCount.toString());
-                return "Stats for '" + util.colors.grey(this.name) + "': " + count + " files, " + Math.round(this.totalSize / 1204) + "KB";
+                const count = this.totalCount < 100
+                    ? ansiColors.green(this.totalCount.toString())
+                    : ansiColors.red(this.totalCount.toString());
+                return `Stats for '${ansiColors.grey(this.name)}': ${count} files, ${Math.round(this.totalSize / 1204)}KB`;
             }
         }
-    };
-    return Entry;
-}());
-var _entries = new Map();
+    }
+}
+const _entries = new Map();
 function createStatsStream(group, log) {
-    var entry = new Entry(group, 0, 0);
+    const entry = new Entry(group, 0, 0);
     _entries.set(entry.name, entry);
     return es.through(function (data) {
-        var file = data;
+        const file = data;
         if (typeof file.path === 'string') {
             entry.totalCount += 1;
             if (Buffer.isBuffer(file.contents)) {
@@ -58,13 +58,13 @@ function createStatsStream(group, log) {
     }, function () {
         if (log) {
             if (entry.totalCount === 1) {
-                util.log("Stats for '" + util.colors.grey(entry.name) + "': " + Math.round(entry.totalSize / 1204) + "KB");
+                fancyLog(`Stats for '${ansiColors.grey(entry.name)}': ${Math.round(entry.totalSize / 1204)}KB`);
             }
             else {
-                var count = entry.totalCount < 100
-                    ? util.colors.green(entry.totalCount.toString())
-                    : util.colors.red(entry.totalCount.toString());
-                util.log("Stats for '" + util.colors.grey(entry.name) + "': " + count + " files, " + Math.round(entry.totalSize / 1204) + "KB");
+                const count = entry.totalCount < 100
+                    ? ansiColors.green(entry.totalCount.toString())
+                    : ansiColors.red(entry.totalCount.toString());
+                fancyLog(`Stats for '${ansiColors.grey(entry.name)}': ${count} files, ${Math.round(entry.totalSize / 1204)}KB`);
             }
         }
         this.emit('end');
@@ -72,9 +72,10 @@ function createStatsStream(group, log) {
 }
 exports.createStatsStream = createStatsStream;
 function submitAllStats(productJson, commit) {
-    var sorted = [];
+    const appInsights = require('applicationinsights');
+    const sorted = [];
     // move entries for single files to the front
-    _entries.forEach(function (value) {
+    _entries.forEach(value => {
         if (value.totalCount === 1) {
             sorted.unshift(value);
         }
@@ -83,8 +84,7 @@ function submitAllStats(productJson, commit) {
         }
     });
     // print to console
-    for (var _i = 0, sorted_1 = sorted; _i < sorted_1.length; _i++) {
-        var entry = sorted_1[_i];
+    for (const entry of sorted) {
         console.log(entry.toString(true));
     }
     // send data as telementry event when the
@@ -92,12 +92,11 @@ function submitAllStats(productJson, commit) {
     if (!productJson || !productJson.aiConfig || typeof productJson.aiConfig.asimovKey !== 'string') {
         return Promise.resolve(false);
     }
-    return new Promise(function (resolve) {
+    return new Promise(resolve => {
         try {
-            var sizes = {};
-            var counts = {};
-            for (var _i = 0, sorted_2 = sorted; _i < sorted_2.length; _i++) {
-                var entry = sorted_2[_i];
+            const sizes = {};
+            const counts = {};
+            for (const entry of sorted) {
                 sizes[entry.name] = entry.totalSize;
                 counts[entry.name] = entry.totalCount;
             }
@@ -119,10 +118,10 @@ function submitAllStats(productJson, commit) {
             */
             appInsights.defaultClient.trackEvent({
                 name: 'monacoworkbench/packagemetrics',
-                properties: { commit: commit, size: JSON.stringify(sizes), count: JSON.stringify(counts) }
+                properties: { commit, size: JSON.stringify(sizes), count: JSON.stringify(counts) }
             });
             appInsights.defaultClient.flush({
-                callback: function () {
+                callback: () => {
                     appInsights.dispose();
                     resolve(true);
                 }

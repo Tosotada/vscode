@@ -3,9 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ModelDecorationOptions } from 'vs/editor/common/model/textModel';
 import { Range } from 'vs/editor/common/core/range';
-import { IModelDecoration, TrackedRangeStickiness as ActualTrackedRangeStickiness } from 'vs/editor/common/model';
+import { IModelDecoration, TrackedRangeStickiness, TrackedRangeStickiness as ActualTrackedRangeStickiness } from 'vs/editor/common/model';
+import { ModelDecorationOptions } from 'vs/editor/common/model/textModel';
 
 //
 // The red-black tree is based on the "Introduction to Algorithms" by Cormen, Leiserson and Rivest.
@@ -17,18 +17,8 @@ export const enum ClassName {
 	EditorWarningDecoration = 'squiggly-warning',
 	EditorErrorDecoration = 'squiggly-error',
 	EditorUnnecessaryDecoration = 'squiggly-unnecessary',
-	EditorUnnecessaryInlineDecoration = 'squiggly-inline-unnecessary'
-}
-
-/**
- * Describes the behavior of decorations when typing/editing near their edges.
- * Note: Please do not edit the values, as they very carefully match `DecorationRangeBehavior`
- */
-const enum TrackedRangeStickiness {
-	AlwaysGrowsWhenTypingAtEdges = 0,
-	NeverGrowsWhenTypingAtEdges = 1,
-	GrowsOnlyWhenTypingBefore = 2,
-	GrowsOnlyWhenTypingAfter = 3,
+	EditorUnnecessaryInlineDecoration = 'squiggly-inline-unnecessary',
+	EditorDeprecatedInlineDecoration = 'squiggly-inline-deprecated'
 }
 
 export const enum NodeColor {
@@ -164,9 +154,9 @@ export class IntervalNode implements IModelDecoration {
 	constructor(id: string, start: number, end: number) {
 		this.metadata = 0;
 
-		this.parent = null;
-		this.left = null;
-		this.right = null;
+		this.parent = this;
+		this.left = this;
+		this.right = this;
 		setNodeColor(this, NodeColor.Red);
 
 		this.start = start;
@@ -177,7 +167,7 @@ export class IntervalNode implements IModelDecoration {
 
 		this.id = id;
 		this.ownerId = 0;
-		this.options = null;
+		this.options = null!;
 		setNodeIsForValidation(this, false);
 		_setNodeStickiness(this, TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges);
 		setNodeIsInOverviewRuler(this, false);
@@ -186,7 +176,7 @@ export class IntervalNode implements IModelDecoration {
 		this.cachedVersionId = 0;
 		this.cachedAbsoluteStart = start;
 		this.cachedAbsoluteEnd = end;
-		this.range = null;
+		this.range = null!;
 
 		setNodeIsVisited(this, false);
 	}
@@ -216,7 +206,7 @@ export class IntervalNode implements IModelDecoration {
 
 	public setCachedOffsets(absoluteStart: number, absoluteEnd: number, cachedVersionId: number): void {
 		if (this.cachedVersionId !== cachedVersionId) {
-			this.range = null;
+			this.range = null!;
 		}
 		this.cachedVersionId = cachedVersionId;
 		this.cachedAbsoluteStart = absoluteStart;
@@ -224,13 +214,13 @@ export class IntervalNode implements IModelDecoration {
 	}
 
 	public detach(): void {
-		this.parent = null;
-		this.left = null;
-		this.right = null;
+		this.parent = null!;
+		this.left = null!;
+		this.right = null!;
 	}
 }
 
-export const SENTINEL: IntervalNode = new IntervalNode(null, 0, 0);
+export const SENTINEL: IntervalNode = new IntervalNode(null!, 0, 0);
 SENTINEL.parent = SENTINEL;
 SENTINEL.left = SENTINEL;
 SENTINEL.right = SENTINEL;
@@ -475,11 +465,9 @@ export function nodeAcceptEdit(node: IntervalNode, start: number, end: number, t
 	const deltaColumn = (insertingCnt - deletingCnt);
 	if (!startDone) {
 		node.start = Math.max(0, nodeStart + deltaColumn);
-		startDone = true;
 	}
 	if (!endDone) {
 		node.end = Math.max(0, nodeEnd + deltaColumn);
-		endDone = true;
 	}
 
 	if (node.start > node.end) {

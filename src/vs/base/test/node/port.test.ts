@@ -6,14 +6,10 @@
 import * as assert from 'assert';
 import * as net from 'net';
 import * as ports from 'vs/base/node/ports';
+import { flakySuite } from 'vs/base/test/node/testUtils';
 
-suite('Ports', () => {
-	test('Finds a free port (no timeout)', function (done) {
-		this.timeout(1000 * 10); // higher timeout for this test
-
-		if (process.env['VSCODE_PID']) {
-			return done(); // this test fails when run from within VS Code
-		}
+flakySuite('Ports', () => {
+	(process.env['VSCODE_PID'] ? test.skip /* this test fails when run from within VS Code */ : test)('Finds a free port (no timeout)', function (done) {
 
 		// get an initial freeport >= 7000
 		ports.findFreePort(7000, 100, 300000).then(initialPort => {
@@ -21,7 +17,7 @@ suite('Ports', () => {
 
 			// create a server to block this port
 			const server = net.createServer();
-			server.listen(initialPort, null, null, () => {
+			server.listen(initialPort, undefined, undefined, () => {
 
 				// once listening, find another free port and assert that the port is different from the opened one
 				ports.findFreePort(7000, 50, 300000).then(freePort => {

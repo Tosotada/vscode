@@ -3,11 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as strings from 'vs/base/common/strings';
-import { ITextBufferBuilder, DefaultEndOfLine, ITextBufferFactory, ITextBuffer } from 'vs/editor/common/model';
-import { PieceTreeTextBuffer } from 'vs/editor/common/model/pieceTreeTextBuffer/pieceTreeTextBuffer';
-import { StringBuffer, createLineStarts, createLineStartsFast } from 'vs/editor/common/model/pieceTreeTextBuffer/pieceTreeBase';
 import { CharCode } from 'vs/base/common/charCode';
+import { IDisposable } from 'vs/base/common/lifecycle';
+import * as strings from 'vs/base/common/strings';
+import { DefaultEndOfLine, ITextBuffer, ITextBufferBuilder, ITextBufferFactory } from 'vs/editor/common/model';
+import { StringBuffer, createLineStarts, createLineStartsFast } from 'vs/editor/common/model/pieceTreeTextBuffer/pieceTreeBase';
+import { PieceTreeTextBuffer } from 'vs/editor/common/model/pieceTreeTextBuffer/pieceTreeTextBuffer';
 
 export class PieceTreeTextBufferFactory implements ITextBufferFactory {
 
@@ -18,6 +19,7 @@ export class PieceTreeTextBufferFactory implements ITextBufferFactory {
 		private readonly _lf: number,
 		private readonly _crlf: number,
 		private readonly _containsRTL: boolean,
+		private readonly _containsUnusualLineTerminators: boolean,
 		private readonly _isBasicASCII: boolean,
 		private readonly _normalizeEOL: boolean
 	) { }
@@ -37,7 +39,7 @@ export class PieceTreeTextBufferFactory implements ITextBufferFactory {
 		return '\n';
 	}
 
-	public create(defaultEOL: DefaultEndOfLine): ITextBuffer {
+	public create(defaultEOL: DefaultEndOfLine): { textBuffer: ITextBuffer; disposable: IDisposable; } {
 		const eol = this._getEOL(defaultEOL);
 		let chunks = this._chunks;
 
@@ -53,26 +55,28 @@ export class PieceTreeTextBufferFactory implements ITextBufferFactory {
 			}
 		}
 
-		return new PieceTreeTextBuffer(chunks, this._bom, eol, this._containsRTL, this._isBasicASCII, this._normalizeEOL);
+		const textBuffer = new PieceTreeTextBuffer(chunks, this._bom, eol, this._containsRTL, this._containsUnusualLineTerminators, this._isBasicASCII, this._normalizeEOL);
+		return { textBuffer: textBuffer, disposable: textBuffer };
 	}
 
 	public getFirstLineText(lengthLimit: number): string {
-		return this._chunks[0].buffer.substr(0, 100).split(/\r\n|\r|\n/)[0];
+		return this._chunks[0].buffer.substr(0, lengthLimit).split(/\r\n|\r|\n/)[0];
 	}
 }
 
 export class PieceTreeTextBufferBuilder implements ITextBufferBuilder {
-	private chunks: StringBuffer[];
+	private readonly chunks: StringBuffer[];
 	private BOM: string;
 
 	private _hasPreviousChar: boolean;
 	private _previousChar: number;
-	private _tmpLineStarts: number[];
+	private readonly _tmpLineStarts: number[];
 
 	private cr: number;
 	private lf: number;
 	private crlf: number;
 	private containsRTL: boolean;
+	private containsUnusualLineTerminators: boolean;
 	private isBasicASCII: boolean;
 
 	constructor() {
@@ -87,6 +91,7 @@ export class PieceTreeTextBufferBuilder implements ITextBufferBuilder {
 		this.lf = 0;
 		this.crlf = 0;
 		this.containsRTL = false;
+		this.containsUnusualLineTerminators = false;
 		this.isBasicASCII = true;
 	}
 
@@ -103,7 +108,7 @@ export class PieceTreeTextBufferBuilder implements ITextBufferBuilder {
 		}
 
 		const lastChar = chunk.charCodeAt(chunk.length - 1);
-		if (lastChar === CharCode.CarriageReturn || (lastChar >= 0xd800 && lastChar <= 0xdbff)) {
+		if (lastChar === CharCode.CarriageReturn || (lastChar >= 0xD800 && lastChar <= 0xDBFF)) {
 			// last character is \r or a high surrogate => keep it back
 			this._acceptChunk1(chunk.substr(0, chunk.length - 1), false);
 			this._hasPreviousChar = true;
@@ -140,8 +145,12 @@ export class PieceTreeTextBufferBuilder implements ITextBufferBuilder {
 			this.isBasicASCII = lineStarts.isBasicASCII;
 		}
 		if (!this.isBasicASCII && !this.containsRTL) {
-			// No need to check if is basic ASCII
+			// No need to check if it is basic ASCII
 			this.containsRTL = strings.containsRTL(chunk);
+		}
+		if (!this.isBasicASCII && !this.containsUnusualLineTerminators) {
+			// No need to check if it is basic ASCII
+			this.containsUnusualLineTerminators = strings.containsUnusualLineTerminators(chunk);
 		}
 	}
 
@@ -154,6 +163,7 @@ export class PieceTreeTextBufferBuilder implements ITextBufferBuilder {
 			this.lf,
 			this.crlf,
 			this.containsRTL,
+			this.containsUnusualLineTerminators,
 			this.isBasicASCII,
 			normalizeEOL
 		);

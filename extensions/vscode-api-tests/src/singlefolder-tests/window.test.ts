@@ -4,13 +4,17 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { workspace, window, commands, ViewColumn, TextEditorViewColumnChangeEvent, Uri, Selection, Position, CancellationTokenSource, TextEditorSelectionChangeKind, Terminal } from 'vscode';
+import { workspace, window, commands, ViewColumn, TextEditorViewColumnChangeEvent, Uri, Selection, Position, CancellationTokenSource, TextEditorSelectionChangeKind, QuickPickItem, TextEditor } from 'vscode';
 import { join } from 'path';
-import { closeAllEditors, pathEquals, createRandomFile } from '../utils';
+import { closeAllEditors, pathEquals, createRandomFile, assertNoRpc } from '../utils';
 
-suite('window namespace tests', () => {
 
-	teardown(closeAllEditors);
+suite('vscode API - window', () => {
+
+	teardown(async function () {
+		assertNoRpc();
+		await closeAllEditors();
+	});
 
 	test('editor, active text editor', async () => {
 		const doc = await workspace.openTextDocument(join(workspace.rootPath || '', './far.js'));
@@ -84,7 +88,7 @@ suite('window namespace tests', () => {
 
 			let [one, two] = editors;
 
-			await new Promise(resolve => {
+			await new Promise<void>(resolve => {
 				let registration2 = window.onDidChangeTextEditorViewColumn(event => {
 					actualEvent = event;
 					registration2.dispose();
@@ -119,7 +123,7 @@ suite('window namespace tests', () => {
 			let [, two] = editors;
 			two.show();
 
-			return new Promise(resolve => {
+			return new Promise<void>(resolve => {
 
 				let registration2 = window.onDidChangeTextEditorViewColumn(event => {
 					actualEvents.push(event);
@@ -136,8 +140,7 @@ suite('window namespace tests', () => {
 			}).then(() => {
 				assert.equal(actualEvents.length, 2);
 
-				for (let i = 0; i < actualEvents.length; i++) {
-					const event = actualEvents[i];
+				for (const event of actualEvents) {
 					assert.equal(event.viewColumn, event.textEditor.viewColumn);
 				}
 
@@ -147,16 +150,36 @@ suite('window namespace tests', () => {
 	});
 
 	test('active editor not always correct... #49125', async function () {
+		if (process.env['BUILD_SOURCEVERSION']) {
+			this.skip();
+			return;
+		}
+		function assertActiveEditor(editor: TextEditor) {
+			if (window.activeTextEditor === editor) {
+				assert.ok(true);
+				return;
+			}
+			function printEditor(editor: TextEditor): string {
+				return `doc: ${editor.document.uri.toString()}, column: ${editor.viewColumn}, active: ${editor === window.activeTextEditor}`;
+			}
+			const visible = window.visibleTextEditors.map(editor => printEditor(editor));
+			assert.ok(false, `ACTIVE editor should be ${printEditor(editor)}, BUT HAVING ${visible.join(', ')}`);
+
+		}
+
+		const randomFile1 = await createRandomFile();
+		const randomFile2 = await createRandomFile();
+
 		const [docA, docB] = await Promise.all([
-			workspace.openTextDocument(await createRandomFile()),
-			workspace.openTextDocument(await createRandomFile()),
+			workspace.openTextDocument(randomFile1),
+			workspace.openTextDocument(randomFile2)
 		]);
 		for (let c = 0; c < 4; c++) {
 			let editorA = await window.showTextDocument(docA, ViewColumn.One);
-			assert(window.activeTextEditor === editorA);
+			assertActiveEditor(editorA);
 
 			let editorB = await window.showTextDocument(docB, ViewColumn.Two);
-			assert(window.activeTextEditor === editorB);
+			assertActiveEditor(editorB);
 		}
 	});
 
@@ -381,38 +404,39 @@ suite('window namespace tests', () => {
 		assert.equal(await two, 'notempty');
 	});
 
-
 	test('showQuickPick, accept first', async function () {
-		const pick = window.showQuickPick(['eins', 'zwei', 'drei']);
+		const tracker = createQuickPickTracker<string>();
+		const first = tracker.nextItem();
+		const pick = window.showQuickPick(['eins', 'zwei', 'drei'], {
+			onDidSelectItem: tracker.onDidSelectItem
+		});
+		assert.equal(await first, 'eins');
 		await commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
 		assert.equal(await pick, 'eins');
+		return tracker.done();
 	});
 
 	test('showQuickPick, accept second', async function () {
-		const resolves: ((value: string) => void)[] = [];
-		let done: () => void;
-		const unexpected = new Promise((resolve, reject) => {
-			done = () => resolve();
-			resolves.push(reject);
-		});
-		const first = new Promise(resolve => resolves.push(resolve));
+		const tracker = createQuickPickTracker<string>();
+		const first = tracker.nextItem();
 		const pick = window.showQuickPick(['eins', 'zwei', 'drei'], {
-			onDidSelectItem: item => resolves.pop()!(item as string)
+			onDidSelectItem: tracker.onDidSelectItem
 		});
 		assert.equal(await first, 'eins');
-		const second = new Promise(resolve => resolves.push(resolve));
+		const second = tracker.nextItem();
 		await commands.executeCommand('workbench.action.quickOpenSelectNext');
 		assert.equal(await second, 'zwei');
 		await commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
 		assert.equal(await pick, 'zwei');
-		done!();
-		return unexpected;
+		return tracker.done();
 	});
 
 	test('showQuickPick, select first two', async function () {
+		// const label = 'showQuickPick, select first two';
+		// let i = 0;
 		const resolves: ((value: string) => void)[] = [];
 		let done: () => void;
-		const unexpected = new Promise((resolve, reject) => {
+		const unexpected = new Promise<void>((resolve, reject) => {
 			done = () => resolve();
 			resolves.push(reject);
 		});
@@ -421,28 +445,49 @@ suite('window namespace tests', () => {
 			canPickMany: true
 		});
 		const first = new Promise(resolve => resolves.push(resolve));
+		// console.log(`${label}: ${++i}`);
+		await new Promise(resolve => setTimeout(resolve, 100)); // Allow UI to update.
+		// console.log(`${label}: ${++i}`);
 		await commands.executeCommand('workbench.action.quickOpenSelectNext');
+		// console.log(`${label}: ${++i}`);
 		assert.equal(await first, 'eins');
+		// console.log(`${label}: ${++i}`);
 		await commands.executeCommand('workbench.action.quickPickManyToggle');
+		// console.log(`${label}: ${++i}`);
 		const second = new Promise(resolve => resolves.push(resolve));
 		await commands.executeCommand('workbench.action.quickOpenSelectNext');
+		// console.log(`${label}: ${++i}`);
 		assert.equal(await second, 'zwei');
+		// console.log(`${label}: ${++i}`);
 		await commands.executeCommand('workbench.action.quickPickManyToggle');
+		// console.log(`${label}: ${++i}`);
 		await commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+		// console.log(`${label}: ${++i}`);
 		assert.deepStrictEqual(await picks, ['eins', 'zwei']);
+		// console.log(`${label}: ${++i}`);
 		done!();
 		return unexpected;
 	});
 
-	test('showQuickPick, keep selection (Microsoft/vscode-azure-account#67)', async function () {
+	test('showQuickPick, keep selection (microsoft/vscode-azure-account#67)', async function () {
 		const picks = window.showQuickPick([
 			{ label: 'eins' },
 			{ label: 'zwei', picked: true },
 			{ label: 'drei', picked: true }
 		], {
-				canPickMany: true
-			});
+			canPickMany: true
+		});
+		await new Promise<void>(resolve => setTimeout(() => resolve(), 100));
 		await commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+		if (await Promise.race([picks, new Promise<boolean>(resolve => setTimeout(() => resolve(false), 100))]) === false) {
+			await commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+			if (await Promise.race([picks, new Promise<boolean>(resolve => setTimeout(() => resolve(false), 1000))]) === false) {
+				await commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+				if (await Promise.race([picks, new Promise<boolean>(resolve => setTimeout(() => resolve(false), 1000))]) === false) {
+					assert.ok(false, 'Picks not resolved!');
+				}
+			}
+		}
 		assert.deepStrictEqual((await picks)!.map(pick => pick.label), ['zwei', 'drei']);
 	});
 
@@ -518,14 +563,20 @@ suite('window namespace tests', () => {
 	test('showWorkspaceFolderPick', async function () {
 		const p = window.showWorkspaceFolderPick(undefined);
 
+		await new Promise(resolve => setTimeout(resolve, 10));
 		await commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
-		try {
-			await p;
-			assert.ok(true);
+		const r1 = await Promise.race([p, new Promise<boolean>(resolve => setTimeout(() => resolve(false), 100))]);
+		if (r1 !== false) {
+			return;
 		}
-		catch (_error) {
-			assert.ok(false);
+		await commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+		const r2 = await Promise.race([p, new Promise<boolean>(resolve => setTimeout(() => resolve(false), 1000))]);
+		if (r2 !== false) {
+			return;
 		}
+		await commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+		const r3 = await Promise.race([p, new Promise<boolean>(resolve => setTimeout(() => resolve(false), 1000))]);
+		assert.ok(r3 !== false);
 	});
 
 	test('Default value for showInput Box not accepted when it fails validateInput, reversing #33691', async function () {
@@ -543,12 +594,29 @@ suite('window namespace tests', () => {
 		assert.equal(await result, undefined);
 	});
 
+	function createQuickPickTracker<T extends string | QuickPickItem>() {
+		const resolves: ((value: T) => void)[] = [];
+		let done: () => void;
+		const unexpected = new Promise<void>((resolve, reject) => {
+			done = () => resolve();
+			resolves.push(reject);
+		});
+		return {
+			onDidSelectItem: (item: T) => resolves.pop()!(item),
+			nextItem: () => new Promise<T>(resolve => resolves.push(resolve)),
+			done: () => {
+				done!();
+				return unexpected;
+			},
+		};
+	}
+
 
 	test('editor, selection change kind', () => {
 		return workspace.openTextDocument(join(workspace.rootPath || '', './far.js')).then(doc => window.showTextDocument(doc)).then(editor => {
 
 
-			return new Promise((resolve, _reject) => {
+			return new Promise<void>((resolve, _reject) => {
 
 				let subscription = window.onDidChangeTextEditorSelection(e => {
 					assert.ok(e.textEditor === editor);
@@ -561,136 +629,6 @@ suite('window namespace tests', () => {
 				editor.selection = new Selection(editor.selection.anchor, editor.selection.active.translate(2));
 			});
 
-		});
-	});
-
-	suite('Terminal', () => {
-		test('sendText immediately after createTerminal should not throw', () => {
-			const terminal = window.createTerminal();
-			assert.doesNotThrow(terminal.sendText.bind(terminal, 'echo "foo"'));
-			terminal.dispose();
-		});
-
-		test('onDidCloseTerminal event fires when terminal is disposed', (done) => {
-			const terminal = window.createTerminal();
-			const reg = window.onDidCloseTerminal((eventTerminal) => {
-				assert.equal(terminal, eventTerminal);
-				reg.dispose();
-				done();
-			});
-			terminal.dispose();
-		});
-
-		test('processId immediately after createTerminal should fetch the pid', (done) => {
-			const terminal = window.createTerminal();
-			terminal.processId.then(id => {
-				assert.ok(id > 0);
-				terminal.dispose();
-				done();
-			});
-		});
-
-		test('name in constructor should set terminal.name', () => {
-			const terminal = window.createTerminal('a');
-			assert.equal(terminal.name, 'a');
-			terminal.dispose();
-		});
-
-		test('onDidOpenTerminal should fire when a terminal is created', (done) => {
-			const reg1 = window.onDidOpenTerminal(term => {
-				assert.equal(term.name, 'b');
-				reg1.dispose();
-				const reg2 = window.onDidCloseTerminal(() => {
-					reg2.dispose();
-					done();
-				});
-				terminal.dispose();
-			});
-			const terminal = window.createTerminal('b');
-		});
-
-		test('createTerminalRenderer should fire onDidOpenTerminal and onDidCloseTerminal', (done) => {
-			const reg1 = window.onDidOpenTerminal(term => {
-				assert.equal(term.name, 'c');
-				reg1.dispose();
-				const reg2 = window.onDidCloseTerminal(() => {
-					reg2.dispose();
-					done();
-				});
-				term.dispose();
-			});
-			window.createTerminalRenderer('c');
-		});
-
-		test('terminal renderers should get maximum dimensions set when shown', (done) => {
-			let terminal: Terminal;
-			const reg1 = window.onDidOpenTerminal(term => {
-				reg1.dispose();
-				term.show();
-				terminal = term;
-			});
-			const renderer = window.createTerminalRenderer('foo');
-			const reg2 = renderer.onDidChangeMaximumDimensions(dimensions => {
-				assert.ok(dimensions.columns > 0);
-				assert.ok(dimensions.rows > 0);
-				reg2.dispose();
-				const reg3 = window.onDidCloseTerminal(() => {
-					reg3.dispose();
-					done();
-				});
-				terminal.dispose();
-			});
-		});
-
-		test('TerminalRenderer.write should fire Terminal.onData', (done) => {
-			const reg1 = window.onDidOpenTerminal(terminal => {
-				reg1.dispose();
-				const reg2 = terminal.onDidWriteData(data => {
-					assert.equal(data, 'bar');
-					reg2.dispose();
-					const reg3 = window.onDidCloseTerminal(() => {
-						reg3.dispose();
-						done();
-					});
-					terminal.dispose();
-				});
-				renderer.write('bar');
-			});
-			const renderer = window.createTerminalRenderer('foo');
-		});
-
-		test('Terminal.sendText should fire Terminal.onInput', (done) => {
-			const reg1 = window.onDidOpenTerminal(terminal => {
-				reg1.dispose();
-				const reg2 = renderer.onDidAcceptInput(data => {
-					assert.equal(data, 'bar');
-					reg2.dispose();
-					const reg3 = window.onDidCloseTerminal(() => {
-						reg3.dispose();
-						done();
-					});
-					terminal.dispose();
-				});
-				terminal.sendText('bar', false);
-			});
-			const renderer = window.createTerminalRenderer('foo');
-		});
-
-		test('onDidChangeActiveTerminal should fire when new terminals are created', (done) => {
-			const reg1 = window.onDidChangeActiveTerminal((active: Terminal | undefined) => {
-				assert.equal(active, terminal);
-				assert.equal(active, window.activeTerminal);
-				reg1.dispose();
-				const reg2 = window.onDidChangeActiveTerminal((active: Terminal | undefined) => {
-					assert.equal(active, undefined);
-					assert.equal(active, window.activeTerminal);
-					reg2.dispose();
-					done();
-				});
-				terminal.dispose();
-			});
-			const terminal = window.createTerminal();
-			terminal.show();
 		});
 	});
 });

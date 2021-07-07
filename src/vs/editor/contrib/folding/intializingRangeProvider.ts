@@ -6,7 +6,6 @@
 import { ITextModel, IModelDeltaDecoration, TrackedRangeStickiness } from 'vs/editor/common/model';
 import { FoldingRegions, ILineRange } from 'vs/editor/contrib/folding/foldingRanges';
 import { RangeProvider } from './folding';
-import { TPromise } from 'vs/base/common/winjs.base';
 import { CancellationToken } from 'vs/base/common/cancellation';
 import { IFoldingRangeData, sanitizeRanges } from 'vs/editor/contrib/folding/syntaxRangeProvider';
 
@@ -18,7 +17,7 @@ export class InitializingRangeProvider implements RangeProvider {
 	private decorationIds: string[] | undefined;
 	private timeout: any;
 
-	constructor(private editorModel: ITextModel, initialRanges: ILineRange[], onTimeout: () => void, timeoutTime: number) {
+	constructor(private readonly editorModel: ITextModel, initialRanges: ILineRange[], onTimeout: () => void, timeoutTime: number) {
 		if (initialRanges.length) {
 			let toDecorationRange = (range: ILineRange): IModelDeltaDecoration => {
 				return {
@@ -41,15 +40,15 @@ export class InitializingRangeProvider implements RangeProvider {
 	dispose(): void {
 		if (this.decorationIds) {
 			this.editorModel.deltaDecorations(this.decorationIds, []);
-			this.decorationIds = void 0;
+			this.decorationIds = undefined;
 		}
 		if (typeof this.timeout === 'number') {
 			clearTimeout(this.timeout);
-			this.timeout = void 0;
+			this.timeout = undefined;
 		}
 	}
 
-	compute(cancelationToken: CancellationToken): Thenable<FoldingRegions> {
+	compute(cancelationToken: CancellationToken): Promise<FoldingRegions> {
 		let foldingRangeData: IFoldingRangeData[] = [];
 		if (this.decorationIds) {
 			for (let id of this.decorationIds) {
@@ -59,7 +58,7 @@ export class InitializingRangeProvider implements RangeProvider {
 				}
 			}
 		}
-		return TPromise.as(sanitizeRanges(foldingRangeData, Number.MAX_VALUE));
+		return Promise.resolve(sanitizeRanges(foldingRangeData, Number.MAX_VALUE));
 	}
 }
 

@@ -7,7 +7,7 @@
  *---------------------------------------------------------------------------------------------
  *---------------------------------------------------------------------------------------------
  *---------------------------------------------------------------------------------------------
- * Please make sure to make edits in the .ts file at https://github.com/Microsoft/vscode-loader/
+ * Please make sure to make edits in the .ts file at https://github.com/microsoft/vscode-loader/
  *---------------------------------------------------------------------------------------------
  *---------------------------------------------------------------------------------------------
  *---------------------------------------------------------------------------------------------
@@ -17,7 +17,7 @@
 var _nlsPluginGlobal = this;
 var NLSBuildLoaderPlugin;
 (function (NLSBuildLoaderPlugin) {
-    var global = _nlsPluginGlobal || {};
+    var global = (_nlsPluginGlobal || {});
     var Resources = global.Plugin && global.Plugin.Resources ? global.Plugin.Resources : undefined;
     var IS_PSEUDO = (global && global.document && global.document.location && global.document.location.hash.indexOf('pseudo=true') >= 0);
     function _format(message, args) {

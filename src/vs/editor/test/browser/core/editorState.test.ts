@@ -5,11 +5,11 @@
 
 import * as assert from 'assert';
 import { URI } from 'vs/base/common/uri';
-import { ITextModel } from 'vs/editor/common/model';
-import { EditorState, CodeEditorStateFlag } from 'vs/editor/browser/core/editorState';
-import { Selection } from 'vs/editor/common/core/selection';
-import { Position } from 'vs/editor/common/core/position';
+import { CodeEditorStateFlag, EditorState } from 'vs/editor/browser/core/editorState';
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
+import { Position } from 'vs/editor/common/core/position';
+import { Selection } from 'vs/editor/common/core/selection';
+import { ITextModel } from 'vs/editor/common/model';
 
 interface IStubEditorState {
 	model?: { uri?: URI, version?: number };
@@ -29,7 +29,7 @@ suite('Editor Core - Editor State', () => {
 
 	test('empty editor state should be valid', () => {
 		let result = validate({}, {});
-		assert.equal(result, true);
+		assert.strictEqual(result, true);
 	});
 
 	test('different model URIs should be invalid', () => {
@@ -38,7 +38,7 @@ suite('Editor Core - Editor State', () => {
 			{ model: { uri: URI.parse('http://test2') } }
 		);
 
-		assert.equal(result, false);
+		assert.strictEqual(result, false);
 	});
 
 	test('different model versions should be invalid', () => {
@@ -47,7 +47,7 @@ suite('Editor Core - Editor State', () => {
 			{ model: { version: 2 } }
 		);
 
-		assert.equal(result, false);
+		assert.strictEqual(result, false);
 	});
 
 	test('different positions should be invalid', () => {
@@ -56,7 +56,7 @@ suite('Editor Core - Editor State', () => {
 			{ position: new Position(2, 3) }
 		);
 
-		assert.equal(result, false);
+		assert.strictEqual(result, false);
 	});
 
 	test('different selections should be invalid', () => {
@@ -65,7 +65,7 @@ suite('Editor Core - Editor State', () => {
 			{ selection: new Selection(5, 2, 3, 4) }
 		);
 
-		assert.equal(result, false);
+		assert.strictEqual(result, false);
 	});
 
 	test('different scroll positions should be invalid', () => {
@@ -74,7 +74,7 @@ suite('Editor Core - Editor State', () => {
 			{ scroll: { left: 3, top: 2 } }
 		);
 
-		assert.equal(result, false);
+		assert.strictEqual(result, false);
 	});
 
 
@@ -92,10 +92,10 @@ suite('Editor Core - Editor State', () => {
 
 		return {
 			getModel: (): ITextModel => <any>mappedModel,
-			getPosition: (): Position => position,
-			getSelection: (): Selection => selection,
-			getScrollLeft: (): number => scroll && scroll.left,
-			getScrollTop: (): number => scroll && scroll.top
+			getPosition: (): Position | undefined => position,
+			getSelection: (): Selection | undefined => selection,
+			getScrollLeft: (): number | undefined => scroll && scroll.left,
+			getScrollTop: (): number | undefined => scroll && scroll.top
 		} as ICodeEditor;
 	}
 

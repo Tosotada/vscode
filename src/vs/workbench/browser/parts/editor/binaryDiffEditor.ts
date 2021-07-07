@@ -10,6 +10,7 @@ import { IThemeService } from 'vs/platform/theme/common/themeService';
 import { SideBySideEditor } from 'vs/workbench/browser/parts/editor/sideBySideEditor';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { BaseBinaryResourceEditor } from 'vs/workbench/browser/parts/editor/binaryEditor';
+import { IStorageService } from 'vs/platform/storage/common/storage';
 
 /**
  * An implementation of editor for diffing binary files like images or videos.
@@ -21,19 +22,20 @@ export class BinaryResourceDiffEditor extends SideBySideEditor {
 	constructor(
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IInstantiationService instantiationService: IInstantiationService,
-		@IThemeService themeService: IThemeService
+		@IThemeService themeService: IThemeService,
+		@IStorageService storageService: IStorageService
 	) {
-		super(telemetryService, instantiationService, themeService);
+		super(telemetryService, instantiationService, themeService, storageService);
 	}
 
-	getMetadata(): string {
-		const master = this.masterEditor;
-		const details = this.detailsEditor;
+	getMetadata(): string | undefined {
+		const primary = this.primaryEditorPane;
+		const secondary = this.secondaryEditorPane;
 
-		if (master instanceof BaseBinaryResourceEditor && details instanceof BaseBinaryResourceEditor) {
-			return nls.localize('metadataDiff', "{0} ↔ {1}", details.getMetadata(), master.getMetadata());
+		if (primary instanceof BaseBinaryResourceEditor && secondary instanceof BaseBinaryResourceEditor) {
+			return nls.localize('metadataDiff', "{0} ↔ {1}", secondary.getMetadata(), primary.getMetadata());
 		}
 
-		return null;
+		return undefined;
 	}
 }

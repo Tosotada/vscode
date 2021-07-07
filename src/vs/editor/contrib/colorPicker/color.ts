@@ -3,16 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { URI } from 'vs/base/common/uri';
-
-import { TPromise } from 'vs/base/common/winjs.base';
-import { ColorProviderRegistry, DocumentColorProvider, IColorInformation, IColorPresentation } from 'vs/editor/common/modes';
-import { ITextModel } from 'vs/editor/common/model';
-import { registerLanguageCommand } from 'vs/editor/browser/editorExtensions';
-import { Range, IRange } from 'vs/editor/common/core/range';
-import { illegalArgument } from 'vs/base/common/errors';
-import { IModelService } from 'vs/editor/common/services/modelService';
 import { CancellationToken } from 'vs/base/common/cancellation';
+import { illegalArgument } from 'vs/base/common/errors';
+import { URI } from 'vs/base/common/uri';
+import { IRange, Range } from 'vs/editor/common/core/range';
+import { ITextModel } from 'vs/editor/common/model';
+import { ColorProviderRegistry, DocumentColorProvider, IColorInformation, IColorPresentation } from 'vs/editor/common/modes';
+import { IModelService } from 'vs/editor/common/services/modelService';
+import { CommandsRegistry } from 'vs/platform/commands/common/commands';
 
 
 export interface IColorData {
@@ -34,13 +32,13 @@ export function getColors(model: ITextModel, token: CancellationToken): Promise<
 	return Promise.all(promises).then(() => colors);
 }
 
-export function getColorPresentations(model: ITextModel, colorInfo: IColorInformation, provider: DocumentColorProvider, token: CancellationToken): Promise<IColorPresentation[]> {
+export function getColorPresentations(model: ITextModel, colorInfo: IColorInformation, provider: DocumentColorProvider, token: CancellationToken): Promise<IColorPresentation[] | null | undefined> {
 	return Promise.resolve(provider.provideColorPresentations(model, colorInfo, token));
 }
 
-registerLanguageCommand('_executeDocumentColorProvider', function (accessor, args) {
+CommandsRegistry.registerCommand('_executeDocumentColorProvider', function (accessor, ...args) {
 
-	const { resource } = args;
+	const [resource] = args;
 	if (!(resource instanceof URI)) {
 		throw illegalArgument();
 	}
@@ -60,19 +58,20 @@ registerLanguageCommand('_executeDocumentColorProvider', function (accessor, arg
 		}
 	}));
 
-	return TPromise.join(promises).then(() => rawCIs);
+	return Promise.all(promises).then(() => rawCIs);
 });
 
 
-registerLanguageCommand('_executeColorPresentationProvider', function (accessor, args) {
+CommandsRegistry.registerCommand('_executeColorPresentationProvider', function (accessor, ...args) {
 
-	const { resource, color, range } = args;
-	if (!(resource instanceof URI) || !Array.isArray(color) || color.length !== 4 || !Range.isIRange(range)) {
+	const [color, context] = args;
+	const { uri, range } = context;
+	if (!(uri instanceof URI) || !Array.isArray(color) || color.length !== 4 || !Range.isIRange(range)) {
 		throw illegalArgument();
 	}
 	const [red, green, blue, alpha] = color;
 
-	const model = accessor.get(IModelService).getModel(resource);
+	const model = accessor.get(IModelService).getModel(uri);
 	if (!model) {
 		throw illegalArgument();
 	}
@@ -89,5 +88,5 @@ registerLanguageCommand('_executeColorPresentationProvider', function (accessor,
 			presentations.push(...result);
 		}
 	}));
-	return TPromise.join(promises).then(() => presentations);
+	return Promise.all(promises).then(() => presentations);
 });

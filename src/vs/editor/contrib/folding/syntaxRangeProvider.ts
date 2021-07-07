@@ -7,9 +7,9 @@ import { FoldingRangeProvider, FoldingRange, FoldingContext } from 'vs/editor/co
 import { onUnexpectedExternalError } from 'vs/base/common/errors';
 import { ITextModel } from 'vs/editor/common/model';
 import { RangeProvider } from './folding';
-import { TPromise } from 'vs/base/common/winjs.base';
 import { MAX_LINE_NUMBER, FoldingRegions } from './foldingRanges';
 import { CancellationToken } from 'vs/base/common/cancellation';
+import { DisposableStore } from 'vs/base/common/lifecycle';
 
 const MAX_FOLDING_REGIONS = 5000;
 
@@ -26,10 +26,20 @@ export class SyntaxRangeProvider implements RangeProvider {
 
 	readonly id = ID_SYNTAX_PROVIDER;
 
-	constructor(private editorModel: ITextModel, private providers: FoldingRangeProvider[], private limit = MAX_FOLDING_REGIONS) {
+	readonly disposables: DisposableStore | undefined;
+
+	constructor(private readonly editorModel: ITextModel, private providers: FoldingRangeProvider[], handleFoldingRangesChange: () => void, private limit = MAX_FOLDING_REGIONS) {
+		for (const provider of providers) {
+			if (typeof provider.onDidChange === 'function') {
+				if (!this.disposables) {
+					this.disposables = new DisposableStore();
+				}
+				this.disposables.add(provider.onDidChange(handleFoldingRangesChange));
+			}
+		}
 	}
 
-	compute(cancellationToken: CancellationToken): Thenable<FoldingRegions> {
+	compute(cancellationToken: CancellationToken): Promise<FoldingRegions | null> {
 		return collectSyntaxRanges(this.providers, this.editorModel, cancellationToken).then(ranges => {
 			if (ranges) {
 				let res = sanitizeRanges(ranges, this.limit);
@@ -40,12 +50,12 @@ export class SyntaxRangeProvider implements RangeProvider {
 	}
 
 	dispose() {
+		this.disposables?.dispose();
 	}
-
 }
 
-function collectSyntaxRanges(providers: FoldingRangeProvider[], model: ITextModel, cancellationToken: CancellationToken): Thenable<IFoldingRangeData[] | null> {
-	let rangeData: IFoldingRangeData[] = null;
+function collectSyntaxRanges(providers: FoldingRangeProvider[], model: ITextModel, cancellationToken: CancellationToken): Promise<IFoldingRangeData[] | null> {
+	let rangeData: IFoldingRangeData[] | null = null;
 	let promises = providers.map((provider, i) => {
 		return Promise.resolve(provider.provideFoldingRanges(model, foldingContext, cancellationToken)).then(ranges => {
 			if (cancellationToken.isCancellationRequested) {
@@ -64,19 +74,19 @@ function collectSyntaxRanges(providers: FoldingRangeProvider[], model: ITextMode
 			}
 		}, onUnexpectedExternalError);
 	});
-	return TPromise.join(promises).then(_ => {
+	return Promise.all(promises).then(_ => {
 		return rangeData;
 	});
 }
 
 export class RangesCollector {
-	private _startIndexes: number[];
-	private _endIndexes: number[];
-	private _nestingLevels: number[];
-	private _nestingLevelCounts: number[];
-	private _types: string[];
+	private readonly _startIndexes: number[];
+	private readonly _endIndexes: number[];
+	private readonly _nestingLevels: number[];
+	private readonly _nestingLevelCounts: number[];
+	private readonly _types: Array<string | undefined>;
 	private _length: number;
-	private _foldingRangesLimit: number;
+	private readonly _foldingRangesLimit: number;
 
 	constructor(foldingRangesLimit: number) {
 		this._startIndexes = [];
@@ -88,7 +98,7 @@ export class RangesCollector {
 		this._foldingRangesLimit = foldingRangesLimit;
 	}
 
-	public add(startLineNumber: number, endLineNumber: number, type: string, nestingLevel: number) {
+	public add(startLineNumber: number, endLineNumber: number, type: string | undefined, nestingLevel: number) {
 		if (startLineNumber > MAX_LINE_NUMBER || endLineNumber > MAX_LINE_NUMBER) {
 			return;
 		}
@@ -128,7 +138,7 @@ export class RangesCollector {
 
 			let startIndexes = new Uint32Array(this._foldingRangesLimit);
 			let endIndexes = new Uint32Array(this._foldingRangesLimit);
-			let types = [];
+			let types: Array<string | undefined> = [];
 			for (let i = 0, k = 0; i < this._length; i++) {
 				let level = this._nestingLevels[i];
 				if (level < maxLevel || (level === maxLevel && entries++ < this._foldingRangesLimit)) {
@@ -156,8 +166,8 @@ export function sanitizeRanges(rangeData: IFoldingRangeData[], limit: number): F
 	});
 	let collector = new RangesCollector(limit);
 
-	let top: IFoldingRangeData = null;
-	let previous = [];
+	let top: IFoldingRangeData | undefined = undefined;
+	let previous: IFoldingRangeData[] = [];
 	for (let entry of sorted) {
 		if (!top) {
 			top = entry;

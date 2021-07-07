@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ColorId, StandardTokenType, LanguageId, TokenMetadata } from 'vs/editor/common/modes';
+import { ColorId, LanguageId, StandardTokenType, TokenMetadata } from 'vs/editor/common/modes';
 
 export interface IViewLineTokens {
 	equals(other: IViewLineTokens): boolean;
@@ -65,6 +65,11 @@ export class LineTokens implements IViewLineTokens {
 			return this._tokens[(tokenIndex - 1) << 1];
 		}
 		return 0;
+	}
+
+	public getMetadata(tokenIndex: number): number {
+		const metadata = this._tokens[(tokenIndex << 1) + 1];
+		return metadata;
 	}
 
 	public getLanguageId(tokenIndex: number): LanguageId {
@@ -132,8 +137,8 @@ export class LineTokens implements IViewLineTokens {
 
 		while (low < high) {
 
-			let mid = low + Math.floor((high - low) / 2);
-			let endOffset = tokens[(mid << 1)];
+			const mid = low + Math.floor((high - low) / 2);
+			const endOffset = tokens[(mid << 1)];
 
 			if (endOffset === desiredIndex) {
 				return mid + 1;

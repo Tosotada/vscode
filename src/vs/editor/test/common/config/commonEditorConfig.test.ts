@@ -3,11 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as assert from 'assert';
+import { IEnvConfiguration } from 'vs/editor/common/config/commonEditorConfig';
+import { IEditorHoverOptions, EditorOption, ConfigurationChangedEvent, IQuickSuggestionsOptions } from 'vs/editor/common/config/editorOptions';
 import { EditorZoom } from 'vs/editor/common/config/editorZoom';
 import { TestConfiguration } from 'vs/editor/test/common/mocks/testConfiguration';
-import { IEnvConfiguration } from 'vs/editor/common/config/commonEditorConfig';
-import { AccessibilitySupport } from 'vs/base/common/platform';
-import { IEditorHoverOptions } from 'vs/editor/common/config/editorOptions';
+import { AccessibilitySupport } from 'vs/platform/accessibility/common/accessibility';
 
 suite('Common Editor Config', () => {
 	test('Zoom Level', () => {
@@ -16,40 +16,40 @@ suite('Common Editor Config', () => {
 		const zoom = EditorZoom;
 
 		zoom.setZoomLevel(0);
-		assert.equal(zoom.getZoomLevel(), 0);
+		assert.strictEqual(zoom.getZoomLevel(), 0);
 
 		zoom.setZoomLevel(-0);
-		assert.equal(zoom.getZoomLevel(), 0);
+		assert.strictEqual(zoom.getZoomLevel(), 0);
 
 		zoom.setZoomLevel(5);
-		assert.equal(zoom.getZoomLevel(), 5);
+		assert.strictEqual(zoom.getZoomLevel(), 5);
 
 		zoom.setZoomLevel(-1);
-		assert.equal(zoom.getZoomLevel(), -1);
+		assert.strictEqual(zoom.getZoomLevel(), -1);
 
 		zoom.setZoomLevel(9);
-		assert.equal(zoom.getZoomLevel(), 9);
+		assert.strictEqual(zoom.getZoomLevel(), 9);
 
 		zoom.setZoomLevel(-9);
-		assert.equal(zoom.getZoomLevel(), -5);
+		assert.strictEqual(zoom.getZoomLevel(), -5);
 
 		zoom.setZoomLevel(20);
-		assert.equal(zoom.getZoomLevel(), 20);
+		assert.strictEqual(zoom.getZoomLevel(), 20);
 
 		zoom.setZoomLevel(-10);
-		assert.equal(zoom.getZoomLevel(), -5);
+		assert.strictEqual(zoom.getZoomLevel(), -5);
 
 		zoom.setZoomLevel(9.1);
-		assert.equal(zoom.getZoomLevel(), 9.1);
+		assert.strictEqual(zoom.getZoomLevel(), 9.1);
 
 		zoom.setZoomLevel(-9.1);
-		assert.equal(zoom.getZoomLevel(), -5);
+		assert.strictEqual(zoom.getZoomLevel(), -5);
 
 		zoom.setZoomLevel(Infinity);
-		assert.equal(zoom.getZoomLevel(), 20);
+		assert.strictEqual(zoom.getZoomLevel(), 20);
 
 		zoom.setZoomLevel(Number.NEGATIVE_INFINITY);
-		assert.equal(zoom.getZoomLevel(), -5);
+		assert.strictEqual(zoom.getZoomLevel(), -5);
 	});
 
 	class TestWrappingConfiguration extends TestConfiguration {
@@ -67,8 +67,10 @@ suite('Common Editor Config', () => {
 	}
 
 	function assertWrapping(config: TestConfiguration, isViewportWrapping: boolean, wrappingColumn: number): void {
-		assert.equal(config.editor.wrappingInfo.isViewportWrapping, isViewportWrapping);
-		assert.equal(config.editor.wrappingInfo.wrappingColumn, wrappingColumn);
+		const options = config.options;
+		const wrappingInfo = options.get(EditorOption.wrappingInfo);
+		assert.strictEqual(wrappingInfo.isViewportWrapping, isViewportWrapping);
+		assert.strictEqual(wrappingInfo.wrappingColumn, wrappingColumn);
 	}
 
 	test('wordWrap default', () => {
@@ -184,8 +186,40 @@ suite('Common Editor Config', () => {
 		});
 		let config = new TestConfiguration({ hover: hoverOptions });
 
-		assert.equal(config.editor.contribInfo.hover.enabled, true);
+		assert.strictEqual(config.options.get(EditorOption.hover).enabled, true);
 		config.updateOptions({ hover: { enabled: false } });
-		assert.equal(config.editor.contribInfo.hover.enabled, false);
+		assert.strictEqual(config.options.get(EditorOption.hover).enabled, false);
+	});
+
+	test('does not emit event when nothing changes', () => {
+		const config = new TestConfiguration({ glyphMargin: true, roundedSelection: false });
+		let event: ConfigurationChangedEvent | null = null;
+		config.onDidChange(e => event = e);
+		assert.strictEqual(config.options.get(EditorOption.glyphMargin), true);
+
+		config.updateOptions({ glyphMargin: true });
+		config.updateOptions({ roundedSelection: false });
+		assert.strictEqual(event, null);
+	});
+
+	test('issue #94931: Unable to open source file', () => {
+		const config = new TestConfiguration({ quickSuggestions: null! });
+		const actual = <Readonly<Required<IQuickSuggestionsOptions>>>config.options.get(EditorOption.quickSuggestions);
+		assert.deepStrictEqual(actual, {
+			other: true,
+			comments: false,
+			strings: false
+		});
+	});
+
+	test('issue #102920: Can\'t snap or split view with JSON files', () => {
+		const config = new TestConfiguration({ quickSuggestions: null! });
+		config.updateOptions({ quickSuggestions: { strings: true } });
+		const actual = <Readonly<Required<IQuickSuggestionsOptions>>>config.options.get(EditorOption.quickSuggestions);
+		assert.deepStrictEqual(actual, {
+			other: true,
+			comments: false,
+			strings: true
+		});
 	});
 });

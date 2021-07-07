@@ -9,7 +9,7 @@ import { Selection } from 'vs/editor/common/core/selection';
 /**
  * Describes the reason the cursor has changed its position.
  */
-export enum CursorChangeReason {
+export const enum CursorChangeReason {
 	/**
 	 * Unknown or not set.
 	 */
@@ -72,6 +72,18 @@ export interface ICursorSelectionChangedEvent {
 	 * The secondary selections.
 	 */
 	readonly secondarySelections: Selection[];
+	/**
+	 * The model version id.
+	 */
+	readonly modelVersionId: number;
+	/**
+	 * The old selections.
+	 */
+	readonly oldSelections: Selection[] | null;
+	/**
+	 * The model version id the that `oldSelections` refer to.
+	 */
+	readonly oldModelVersionId: number;
 	/**
 	 * Source of the call that caused the event.
 	 */

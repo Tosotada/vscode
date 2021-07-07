@@ -2,9 +2,10 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+
 import * as assert from 'assert';
-import { IntervalTree, IntervalNode, getNodeColor, NodeColor, SENTINEL, intervalCompare, setNodeStickiness, nodeAcceptEdit } from 'vs/editor/common/model/intervalTree';
 import { TrackedRangeStickiness } from 'vs/editor/common/model';
+import { IntervalNode, IntervalTree, NodeColor, SENTINEL, getNodeColor, intervalCompare, nodeAcceptEdit, setNodeStickiness } from 'vs/editor/common/model/intervalTree';
 
 const GENERATE_TESTS = false;
 let TEST_COUNT = GENERATE_TESTS ? 10000 : 0;
@@ -73,8 +74,8 @@ suite('IntervalTree', () => {
 		private _oracle: Oracle = new Oracle();
 		private _tree: IntervalTree = new IntervalTree();
 		private _lastNodeId = -1;
-		private _treeNodes: IntervalNode[] = [];
-		private _oracleNodes: Interval[] = [];
+		private _treeNodes: Array<IntervalNode | null> = [];
+		private _oracleNodes: Array<Interval | null> = [];
 
 		public acceptOp(op: IOperation): void {
 
@@ -83,34 +84,34 @@ suite('IntervalTree', () => {
 					console.log(`insert: {${JSON.stringify(new Interval(op.begin, op.end))}}`);
 				}
 				let nodeId = (++this._lastNodeId);
-				this._treeNodes[nodeId] = new IntervalNode(null, op.begin, op.end);
-				this._tree.insert(this._treeNodes[nodeId]);
+				this._treeNodes[nodeId] = new IntervalNode(null!, op.begin, op.end);
+				this._tree.insert(this._treeNodes[nodeId]!);
 				this._oracleNodes[nodeId] = this._oracle.insert(new Interval(op.begin, op.end));
 			} else if (op.type === 'delete') {
 				if (PRINT_TREE) {
 					console.log(`delete: {${JSON.stringify(this._oracleNodes[op.id])}}`);
 				}
-				this._tree.delete(this._treeNodes[op.id]);
-				this._oracle.delete(this._oracleNodes[op.id]);
+				this._tree.delete(this._treeNodes[op.id]!);
+				this._oracle.delete(this._oracleNodes[op.id]!);
 
 				this._treeNodes[op.id] = null;
 				this._oracleNodes[op.id] = null;
 			} else if (op.type === 'change') {
 
-				this._tree.delete(this._treeNodes[op.id]);
-				this._treeNodes[op.id].reset(0, op.begin, op.end, null);
-				this._tree.insert(this._treeNodes[op.id]);
+				this._tree.delete(this._treeNodes[op.id]!);
+				this._treeNodes[op.id]!.reset(0, op.begin, op.end, null!);
+				this._tree.insert(this._treeNodes[op.id]!);
 
-				this._oracle.delete(this._oracleNodes[op.id]);
-				this._oracleNodes[op.id].start = op.begin;
-				this._oracleNodes[op.id].end = op.end;
-				this._oracle.insert(this._oracleNodes[op.id]);
+				this._oracle.delete(this._oracleNodes[op.id]!);
+				this._oracleNodes[op.id]!.start = op.begin;
+				this._oracleNodes[op.id]!.end = op.end;
+				this._oracle.insert(this._oracleNodes[op.id]!);
 
 			} else {
 				let actualNodes = this._tree.intervalSearch(op.begin, op.end, 0, false, 0);
 				let actual = actualNodes.map(n => new Interval(n.cachedAbsoluteStart, n.cachedAbsoluteEnd));
 				let expected = this._oracle.search(new Interval(op.begin, op.end));
-				assert.deepEqual(actual, expected);
+				assert.deepStrictEqual(actual, expected);
 				return;
 			}
 
@@ -122,7 +123,7 @@ suite('IntervalTree', () => {
 
 			let actual = this._tree.getAllInOrder().map(n => new Interval(n.cachedAbsoluteStart, n.cachedAbsoluteEnd));
 			let expected = this._oracle.intervals;
-			assert.deepEqual(actual, expected);
+			assert.deepStrictEqual(actual, expected);
 		}
 
 		public getExistingNodeId(index: number): number {
@@ -488,7 +489,7 @@ suite('IntervalTree', () => {
 				[19, 20]
 			];
 			data.forEach((int) => {
-				let node = new IntervalNode(null, int[0], int[1]);
+				let node = new IntervalNode(null!, int[0], int[1]);
 				r.insert(node);
 			});
 			return r;
@@ -499,7 +500,7 @@ suite('IntervalTree', () => {
 		function assertIntervalSearch(start: number, end: number, expected: [number, number][]): void {
 			let actualNodes = T.intervalSearch(start, end, 0, false, 0);
 			let actual = actualNodes.map((n) => <[number, number]>[n.cachedAbsoluteStart, n.cachedAbsoluteEnd]);
-			assert.deepEqual(actual, expected);
+			assert.deepStrictEqual(actual, expected);
 		}
 
 		test('cormen 1->2', () => {
@@ -558,7 +559,7 @@ suite('IntervalTree', () => {
 		let node = new IntervalNode('', nodeStart, nodeEnd);
 		setNodeStickiness(node, nodeStickiness);
 		nodeAcceptEdit(node, start, end, textLength, forceMoveMarkers);
-		assert.deepEqual([node.start, node.end], [expectedNodeStart, expectedNodeEnd], msg);
+		assert.deepStrictEqual([node.start, node.end], [expectedNodeStart, expectedNodeEnd], msg);
 	}
 
 	test('nodeAcceptEdit', () => {

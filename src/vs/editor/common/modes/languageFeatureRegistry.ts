@@ -3,8 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Event, Emitter } from 'vs/base/common/event';
+import { Emitter, Event } from 'vs/base/common/event';
+import { hash } from 'vs/base/common/hash';
 import { IDisposable, toDisposable } from 'vs/base/common/lifecycle';
+import { LRUCache } from 'vs/base/common/map';
+import { MovingAverage } from 'vs/base/common/numbers';
 import { ITextModel } from 'vs/editor/common/model';
 import { LanguageSelector, score } from 'vs/editor/common/modes/languageSelector';
 import { shouldSynchronizeModel } from 'vs/editor/common/services/modelService';
@@ -22,18 +25,15 @@ function isExclusive(selector: LanguageSelector): boolean {
 	} else if (Array.isArray(selector)) {
 		return selector.every(isExclusive);
 	} else {
-		return selector.exclusive;
+		return !!selector.exclusive;
 	}
 }
 
-export default class LanguageFeatureRegistry<T> {
+export class LanguageFeatureRegistry<T> {
 
 	private _clock: number = 0;
-	private _entries: Entry<T>[] = [];
-	private readonly _onDidChange: Emitter<number> = new Emitter<number>();
-
-	constructor() {
-	}
+	private readonly _entries: Entry<T>[] = [];
+	private readonly _onDidChange = new Emitter<number>();
 
 	get onDidChange(): Event<number> {
 		return this._onDidChange.event;
@@ -41,7 +41,7 @@ export default class LanguageFeatureRegistry<T> {
 
 	register(selector: LanguageSelector, provider: T): IDisposable {
 
-		let entry: Entry<T> = {
+		let entry: Entry<T> | undefined = {
 			selector,
 			provider,
 			_score: -1,
@@ -119,15 +119,14 @@ export default class LanguageFeatureRegistry<T> {
 
 		this._updateScores(model);
 
-		for (let from = 0; from < this._entries.length; from++) {
-			let entry = this._entries[from];
+		for (const entry of this._entries) {
 			if (entry._score > 0) {
 				callback(entry);
 			}
 		}
 	}
 
-	private _lastCandidate: { uri: string; language: string; };
+	private _lastCandidate: { uri: string; language: string; } | undefined;
 
 	private _updateScores(model: ITextModel): void {
 
@@ -176,5 +175,50 @@ export default class LanguageFeatureRegistry<T> {
 		} else {
 			return 0;
 		}
+	}
+}
+
+
+/**
+ * Keeps moving average per model and set of providers so that requests
+ * can be debounce according to the provider performance
+ */
+export class LanguageFeatureRequestDelays {
+
+	private readonly _cache = new LRUCache<string, MovingAverage>(50, 0.7);
+
+	constructor(
+		private readonly _registry: LanguageFeatureRegistry<any>,
+		readonly min: number,
+		readonly max: number = Number.MAX_SAFE_INTEGER,
+	) { }
+
+	private _key(model: ITextModel): string {
+		return model.id + hash(this._registry.all(model));
+	}
+
+	private _clamp(value: number | undefined): number {
+		if (value === undefined) {
+			return this.min;
+		} else {
+			return Math.min(this.max, Math.max(this.min, Math.floor(value * 1.3)));
+		}
+	}
+
+	get(model: ITextModel): number {
+		const key = this._key(model);
+		const avg = this._cache.get(key);
+		return this._clamp(avg?.value);
+	}
+
+	update(model: ITextModel, value: number): number {
+		const key = this._key(model);
+		let avg = this._cache.get(key);
+		if (!avg) {
+			avg = new MovingAverage();
+			this._cache.set(key, avg);
+		}
+		avg.update(value);
+		return this.get(model);
 	}
 }

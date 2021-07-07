@@ -4,14 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { CommonEditorConfiguration, IEnvConfiguration } from 'vs/editor/common/config/commonEditorConfig';
-import { IEditorOptions } from 'vs/editor/common/config/editorOptions';
-import { FontInfo, BareFontInfo } from 'vs/editor/common/config/fontInfo';
-import { AccessibilitySupport } from 'vs/base/common/platform';
+import { IEditorOptions, EditorFontLigatures } from 'vs/editor/common/config/editorOptions';
+import { BareFontInfo, FontInfo } from 'vs/editor/common/config/fontInfo';
+import { AccessibilitySupport } from 'vs/platform/accessibility/common/accessibility';
 
 export class TestConfiguration extends CommonEditorConfiguration {
 
 	constructor(opts: IEditorOptions) {
-		super(opts);
+		super(false, opts);
 		this._recomputeOptions();
 	}
 
@@ -30,9 +30,11 @@ export class TestConfiguration extends CommonEditorConfiguration {
 	protected readConfiguration(styling: BareFontInfo): FontInfo {
 		return new FontInfo({
 			zoomLevel: 0,
+			pixelRatio: 1,
 			fontFamily: 'mockFont',
 			fontWeight: 'normal',
 			fontSize: 14,
+			fontFeatureSettings: EditorFontLigatures.OFF,
 			lineHeight: 19,
 			letterSpacing: 1.5,
 			isMonospace: true,
@@ -40,6 +42,8 @@ export class TestConfiguration extends CommonEditorConfiguration {
 			typicalFullwidthCharacterWidth: 20,
 			canUseHalfwidthRightwardsArrow: true,
 			spaceWidth: 10,
+			middotWidth: 10,
+			wsmiddotWidth: 10,
 			maxDigitWidth: 10,
 		}, true);
 	}

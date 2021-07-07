@@ -16,7 +16,9 @@ export class DelayedDragHandler extends Disposable {
 	constructor(container: HTMLElement, callback: () => void) {
 		super();
 
-		this._register(addDisposableListener(container, 'dragover', () => {
+		this._register(addDisposableListener(container, 'dragover', e => {
+			e.preventDefault(); // needed so that the drop event fires (https://stackoverflow.com/questions/21339924/drop-event-not-firing-in-chrome)
+
 			if (!this.timeout) {
 				this.timeout = setTimeout(() => {
 					callback();
@@ -66,19 +68,47 @@ export const DataTransfers = {
 	FILES: 'Files',
 
 	/**
-	 * Typicaly transfer type for copy/paste transfers.
+	 * Typically transfer type for copy/paste transfers.
 	 */
 	TEXT: 'text/plain'
 };
 
-export function applyDragImage(event: DragEvent, label: string, clazz: string): void {
+export function applyDragImage(event: DragEvent, label: string | null, clazz: string): void {
 	const dragImage = document.createElement('div');
 	dragImage.className = clazz;
 	dragImage.textContent = label;
 
-	document.body.appendChild(dragImage);
-	event.dataTransfer.setDragImage(dragImage, -10, -10);
+	if (event.dataTransfer) {
+		document.body.appendChild(dragImage);
+		event.dataTransfer.setDragImage(dragImage, -10, -10);
 
-	// Removes the element when the DND operation is done
-	setTimeout(() => document.body.removeChild(dragImage), 0);
+		// Removes the element when the DND operation is done
+		setTimeout(() => document.body.removeChild(dragImage), 0);
+	}
 }
+
+export interface IDragAndDropData {
+	update(dataTransfer: DataTransfer): void;
+	getData(): any;
+}
+
+export class DragAndDropData<T> implements IDragAndDropData {
+
+	constructor(private data: T) { }
+
+	update(): void {
+		// noop
+	}
+
+	getData(): T {
+		return this.data;
+	}
+}
+
+export interface IStaticDND {
+	CurrentDragAndDropData: IDragAndDropData | undefined;
+}
+
+export const StaticDND: IStaticDND = {
+	CurrentDragAndDropData: undefined
+};

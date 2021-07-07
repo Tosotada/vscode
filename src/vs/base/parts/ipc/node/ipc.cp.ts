@@ -5,26 +5,34 @@
 
 import { ChildProcess, fork, ForkOptions } from 'child_process';
 import { IDisposable, toDisposable, dispose } from 'vs/base/common/lifecycle';
-import { Delayer, always, createCancelablePromise } from 'vs/base/common/async';
-import { deepClone, assign } from 'vs/base/common/objects';
-import { Emitter, fromNodeEventEmitter, Event } from 'vs/base/common/event';
+import { Delayer, createCancelablePromise } from 'vs/base/common/async';
+import { deepClone } from 'vs/base/common/objects';
+import { Emitter, Event } from 'vs/base/common/event';
 import { createQueuedSender } from 'vs/base/node/processes';
-import { ChannelServer as IPCServer, ChannelClient as IPCClient, IChannelClient, IChannel } from 'vs/base/parts/ipc/node/ipc';
-import { isRemoteConsoleLog, log } from 'vs/base/node/console';
+import { IChannel, ChannelServer as IPCServer, ChannelClient as IPCClient, IChannelClient } from 'vs/base/parts/ipc/common/ipc';
+import { isRemoteConsoleLog, log } from 'vs/base/common/console';
 import { CancellationToken } from 'vs/base/common/cancellation';
 import * as errors from 'vs/base/common/errors';
+import { VSBuffer } from 'vs/base/common/buffer';
+import { isMacintosh } from 'vs/base/common/platform';
 
 /**
  * This implementation doesn't perform well since it uses base64 encoding for buffers.
  * We should move all implementations to use named ipc.net, so we stop depending on cp.fork.
  */
 
-export class Server extends IPCServer {
-	constructor() {
+export class Server<TContext extends string> extends IPCServer<TContext> {
+	constructor(ctx: TContext) {
 		super({
-			send: r => { try { process.send(r.toString('base64')); } catch (e) { /* not much to do */ } },
-			onMessage: fromNodeEventEmitter(process, 'message', msg => Buffer.from(msg, 'base64'))
-		});
+			send: r => {
+				try {
+					if (process.send) {
+						process.send((<Buffer>r.buffer).toString('base64'));
+					}
+				} catch (e) { /* not much to do */ }
+			},
+			onMessage: Event.fromNodeEventEmitter(process, 'message', msg => VSBuffer.wrap(Buffer.from(msg, 'base64')))
+		}, ctx);
 
 		process.once('disconnect', () => this.dispose());
 	}
@@ -63,10 +71,8 @@ export interface IIPCOptions {
 	debugBrk?: number;
 
 	/**
-	 * See https://github.com/Microsoft/vscode/issues/27665
-	 * Allows to pass in fresh execArgv to the forked process such that it doesn't inherit them from `process.execArgv`.
-	 * e.g. Launching the extension host process with `--inspect-brk=xxx` and then forking a process from the extension host
-	 * results in the forked process inheriting `--inspect-brk=xxx`.
+	 * If set, starts the fork with empty execArgv. If not set, execArgv from the parent proces are inherited,
+	 * except --inspect= and --inspect-brk= which are filtered as they would result in a port conflict.
 	 */
 	freshExecArgv?: boolean;
 
@@ -79,13 +85,13 @@ export interface IIPCOptions {
 
 export class Client implements IChannelClient, IDisposable {
 
-	private disposeDelayer: Delayer<void>;
+	private disposeDelayer: Delayer<void> | undefined;
 	private activeRequests = new Set<IDisposable>();
-	private child: ChildProcess;
-	private _client: IPCClient;
+	private child: ChildProcess | null;
+	private _client: IPCClient | null;
 	private channels = new Map<string, IChannel>();
 
-	private _onDidProcessExit = new Emitter<{ code: number, signal: string }>();
+	private readonly _onDidProcessExit = new Emitter<{ code: number, signal: string }>();
 	readonly onDidProcessExit = this._onDidProcessExit.event;
 
 	constructor(private modulePath: string, private options: IIPCOptions) {
@@ -99,7 +105,7 @@ export class Client implements IChannelClient, IDisposable {
 		const that = this;
 
 		return {
-			call<T>(command: string, arg?: any, cancellationToken?: CancellationToken): Thenable<T> {
+			call<T>(command: string, arg?: any, cancellationToken?: CancellationToken): Promise<T> {
 				return that.requestPromise<T>(channelName, command, arg, cancellationToken);
 			},
 			listen(event: string, arg?: any) {
@@ -108,7 +114,7 @@ export class Client implements IChannelClient, IDisposable {
 		} as T;
 	}
 
-	protected requestPromise<T>(channelName: string, name: string, arg?: any, cancellationToken = CancellationToken.None): Thenable<T> {
+	protected requestPromise<T>(channelName: string, name: string, arg?: any, cancellationToken = CancellationToken.None): Promise<T> {
 		if (!this.disposeDelayer) {
 			return Promise.reject(new Error('disposed'));
 		}
@@ -126,11 +132,11 @@ export class Client implements IChannelClient, IDisposable {
 		const disposable = toDisposable(() => result.cancel());
 		this.activeRequests.add(disposable);
 
-		always(result, () => {
+		result.finally(() => {
 			cancellationTokenListener.dispose();
 			this.activeRequests.delete(disposable);
 
-			if (this.activeRequests.size === 0) {
+			if (this.activeRequests.size === 0 && this.disposeDelayer) {
 				this.disposeDelayer.trigger(() => this.disposeClient());
 			}
 		});
@@ -172,10 +178,10 @@ export class Client implements IChannelClient, IDisposable {
 			const args = this.options && this.options.args ? this.options.args : [];
 			const forkOpts: ForkOptions = Object.create(null);
 
-			forkOpts.env = assign(deepClone(process.env), { 'VSCODE_PARENT_PID': String(process.pid) });
+			forkOpts.env = { ...deepClone(process.env), 'VSCODE_PARENT_PID': String(process.pid) };
 
 			if (this.options && this.options.env) {
-				forkOpts.env = assign(forkOpts.env, this.options.env);
+				forkOpts.env = { ...forkOpts.env, ...this.options.env };
 			}
 
 			if (this.options && this.options.freshExecArgv) {
@@ -190,25 +196,37 @@ export class Client implements IChannelClient, IDisposable {
 				forkOpts.execArgv = ['--nolazy', '--inspect-brk=' + this.options.debugBrk];
 			}
 
+			if (forkOpts.execArgv === undefined) {
+				// if not set, the forked process inherits the execArgv of the parent process
+				// --inspect and --inspect-brk can not be inherited as the port would conflict
+				forkOpts.execArgv = process.execArgv.filter(a => !/^--inspect(-brk)?=/.test(a)); // remove
+			}
+
+			if (isMacintosh && forkOpts.env) {
+				// Unset `DYLD_LIBRARY_PATH`, as it leads to process crashes
+				// See https://github.com/microsoft/vscode/issues/105848
+				delete forkOpts.env['DYLD_LIBRARY_PATH'];
+			}
+
 			this.child = fork(this.modulePath, args, forkOpts);
 
-			const onMessageEmitter = new Emitter<Buffer>();
-			const onRawMessage = fromNodeEventEmitter(this.child, 'message', msg => msg);
+			const onMessageEmitter = new Emitter<VSBuffer>();
+			const onRawMessage = Event.fromNodeEventEmitter(this.child, 'message', msg => msg);
 
 			onRawMessage(msg => {
 
 				// Handle remote console logs specially
 				if (isRemoteConsoleLog(msg)) {
 					log(msg, `IPC Library: ${this.options.serverName}`);
-					return null;
+					return;
 				}
 
 				// Anything else goes to the outside
-				onMessageEmitter.fire(Buffer.from(msg, 'base64'));
+				onMessageEmitter.fire(VSBuffer.wrap(Buffer.from(msg, 'base64')));
 			});
 
 			const sender = this.options.useQueue ? createQueuedSender(this.child) : this.child;
-			const send = (r: Buffer) => this.child && this.child.connected && sender.send(r.toString('base64'));
+			const send = (r: VSBuffer) => this.child && this.child.connected && sender.send((<Buffer>r.buffer).toString('base64'));
 			const onMessage = onMessageEmitter.event;
 			const protocol = { send, onMessage };
 
@@ -220,7 +238,7 @@ export class Client implements IChannelClient, IDisposable {
 			this.child.on('error', err => console.warn('IPC "' + this.options.serverName + '" errored with ' + err));
 
 			this.child.on('exit', (code: any, signal: any) => {
-				process.removeListener('exit', onExit);
+				process.removeListener('exit' as 'loaded', onExit); // https://github.com/electron/electron/issues/21475
 
 				this.activeRequests.forEach(r => dispose(r));
 				this.activeRequests.clear();
@@ -253,8 +271,10 @@ export class Client implements IChannelClient, IDisposable {
 
 	private disposeClient() {
 		if (this._client) {
-			this.child.kill();
-			this.child = null;
+			if (this.child) {
+				this.child.kill();
+				this.child = null;
+			}
 			this._client = null;
 			this.channels.clear();
 		}
@@ -262,8 +282,10 @@ export class Client implements IChannelClient, IDisposable {
 
 	dispose() {
 		this._onDidProcessExit.dispose();
-		this.disposeDelayer.cancel();
-		this.disposeDelayer = null;
+		if (this.disposeDelayer) {
+			this.disposeDelayer.cancel();
+			this.disposeDelayer = undefined;
+		}
 		this.disposeClient();
 		this.activeRequests.clear();
 	}

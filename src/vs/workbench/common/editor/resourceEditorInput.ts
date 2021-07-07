@@ -3,44 +3,45 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { TPromise } from 'vs/base/common/winjs.base';
-import { EditorInput, ITextEditorModel } from 'vs/workbench/common/editor';
+import { ITextEditorModel, IModeSupport } from 'vs/workbench/common/editor';
 import { URI } from 'vs/base/common/uri';
 import { IReference } from 'vs/base/common/lifecycle';
-import { telemetryURIDescriptor } from 'vs/platform/telemetry/common/telemetryUtils';
 import { ITextModelService } from 'vs/editor/common/services/resolverService';
 import { ResourceEditorModel } from 'vs/workbench/common/editor/resourceEditorModel';
-import { IHashService } from 'vs/workbench/services/hash/common/hashService';
+import { ITextFileService } from 'vs/workbench/services/textfile/common/textfiles';
+import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
+import { IEditorGroupsService } from 'vs/workbench/services/editor/common/editorGroupsService';
+import { IFileService } from 'vs/platform/files/common/files';
+import { ILabelService } from 'vs/platform/label/common/label';
+import { IFilesConfigurationService } from 'vs/workbench/services/filesConfiguration/common/filesConfigurationService';
+import { AbstractTextResourceEditorInput } from 'vs/workbench/common/editor/textResourceEditorInput';
+import { isEqual } from 'vs/base/common/resources';
 
 /**
  * A read-only text editor input whos contents are made of the provided resource that points to an existing
  * code editor model.
  */
-export class ResourceEditorInput extends EditorInput {
+export class ResourceEditorInput extends AbstractTextResourceEditorInput implements IModeSupport {
 
 	static readonly ID: string = 'workbench.editors.resourceEditorInput';
 
-	private modelReference: TPromise<IReference<ITextEditorModel>>;
-	private resource: URI;
-	private name: string;
-	private description: string;
+	private cachedModel: ResourceEditorModel | undefined = undefined;
+	private modelReference: Promise<IReference<ITextEditorModel>> | undefined = undefined;
 
 	constructor(
-		name: string,
-		description: string,
 		resource: URI,
-		@ITextModelService private textModelResolverService: ITextModelService,
-		@IHashService private hashService: IHashService
+		private name: string | undefined,
+		private description: string | undefined,
+		private preferredMode: string | undefined,
+		@ITextModelService private readonly textModelResolverService: ITextModelService,
+		@ITextFileService textFileService: ITextFileService,
+		@IEditorService editorService: IEditorService,
+		@IEditorGroupsService editorGroupService: IEditorGroupsService,
+		@IFileService fileService: IFileService,
+		@ILabelService labelService: ILabelService,
+		@IFilesConfigurationService filesConfigurationService: IFilesConfigurationService
 	) {
-		super();
-
-		this.name = name;
-		this.description = description;
-		this.resource = resource;
-	}
-
-	getResource(): URI {
-		return this.resource;
+		super(resource, undefined, editorService, editorGroupService, textFileService, labelService, fileService, filesConfigurationService);
 	}
 
 	getTypeId(): string {
@@ -48,68 +49,74 @@ export class ResourceEditorInput extends EditorInput {
 	}
 
 	getName(): string {
-		return this.name;
+		return this.name || super.getName();
 	}
 
 	setName(name: string): void {
 		if (this.name !== name) {
 			this.name = name;
+
 			this._onDidChangeLabel.fire();
 		}
 	}
 
-	getDescription(): string {
+	getDescription(): string | undefined {
 		return this.description;
 	}
 
 	setDescription(description: string): void {
 		if (this.description !== description) {
 			this.description = description;
+
 			this._onDidChangeLabel.fire();
 		}
 	}
 
-	getTelemetryDescriptor(): object {
-		const descriptor = super.getTelemetryDescriptor();
-		descriptor['resource'] = telemetryURIDescriptor(this.resource, path => this.hashService.createSHA1(path));
+	setMode(mode: string): void {
+		this.setPreferredMode(mode);
 
-		/* __GDPR__FRAGMENT__
-			"EditorTelemetryDescriptor" : {
-				"resource": { "${inline}": [ "${URIDescriptor}" ] }
-			}
-		*/
-		return descriptor;
+		if (this.cachedModel) {
+			this.cachedModel.setMode(mode);
+		}
 	}
 
-	resolve(): TPromise<ITextEditorModel> {
+	setPreferredMode(mode: string): void {
+		this.preferredMode = mode;
+	}
+
+	async resolve(): Promise<ITextEditorModel> {
 		if (!this.modelReference) {
 			this.modelReference = this.textModelResolverService.createModelReference(this.resource);
 		}
 
-		return this.modelReference.then(ref => {
-			const model = ref.object;
+		const ref = await this.modelReference;
 
-			if (!(model instanceof ResourceEditorModel)) {
-				ref.dispose();
-				this.modelReference = null;
+		// Ensure the resolved model is of expected type
+		const model = ref.object;
+		if (!(model instanceof ResourceEditorModel)) {
+			ref.dispose();
+			this.modelReference = undefined;
 
-				return TPromise.wrapError<ITextEditorModel>(new Error(`Unexpected model for ResourceInput: ${this.resource}`));
-			}
+			throw new Error(`Unexpected model for ResourceEditorInput: ${this.resource}`);
+		}
 
-			return model;
-		});
+		this.cachedModel = model;
+
+		// Set mode if we have a preferred mode configured
+		if (this.preferredMode) {
+			model.setMode(this.preferredMode);
+		}
+
+		return model;
 	}
 
-	matches(otherInput: any): boolean {
-		if (super.matches(otherInput) === true) {
+	matches(otherInput: unknown): boolean {
+		if (otherInput === this) {
 			return true;
 		}
 
 		if (otherInput instanceof ResourceEditorInput) {
-			let otherResourceEditorInput = <ResourceEditorInput>otherInput;
-
-			// Compare by properties
-			return otherResourceEditorInput.resource.toString() === this.resource.toString();
+			return isEqual(otherInput.resource, this.resource);
 		}
 
 		return false;
@@ -118,8 +125,10 @@ export class ResourceEditorInput extends EditorInput {
 	dispose(): void {
 		if (this.modelReference) {
 			this.modelReference.then(ref => ref.dispose());
-			this.modelReference = null;
+			this.modelReference = undefined;
 		}
+
+		this.cachedModel = undefined;
 
 		super.dispose();
 	}

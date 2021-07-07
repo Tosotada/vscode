@@ -6,40 +6,59 @@
 import * as assert from 'assert';
 import { join } from 'path';
 import * as vscode from 'vscode';
-import { createRandomFile } from '../utils';
+import { assertNoRpc, createRandomFile, testFs } from '../utils';
 
-suite('languages namespace tests', () => {
+suite('vscode API - languages', () => {
+
+	teardown(assertNoRpc);
+
+	const isWindows = process.platform === 'win32';
+
+	function positionToString(p: vscode.Position) {
+		return `[${p.character}/${p.line}]`;
+	}
+
+	function rangeToString(r: vscode.Range) {
+		return `[${positionToString(r.start)}/${positionToString(r.end)}]`;
+	}
+
+	function assertEqualRange(actual: vscode.Range, expected: vscode.Range, message?: string) {
+		assert.equal(rangeToString(actual), rangeToString(expected), message);
+	}
 
 	test('setTextDocumentLanguage -> close/open event', async function () {
 		const file = await createRandomFile('foo\nbar\nbar');
 		const doc = await vscode.workspace.openTextDocument(file);
 		const langIdNow = doc.languageId;
 		let clock = 0;
+		const disposables: vscode.Disposable[] = [];
 
-		let close = new Promise(resolve => {
-			vscode.workspace.onDidCloseTextDocument(e => {
+		let close = new Promise<void>(resolve => {
+			disposables.push(vscode.workspace.onDidCloseTextDocument(e => {
 				if (e === doc) {
 					assert.equal(doc.languageId, langIdNow);
 					assert.equal(clock, 0);
 					clock += 1;
 					resolve();
 				}
-			});
+			}));
 		});
-		let open = new Promise(resolve => {
-			vscode.workspace.onDidOpenTextDocument(e => {
+		let open = new Promise<void>(resolve => {
+			disposables.push(vscode.workspace.onDidOpenTextDocument(e => {
 				if (e === doc) { // same instance!
 					assert.equal(doc.languageId, 'json');
 					assert.equal(clock, 1);
 					clock += 1;
 					resolve();
 				}
-			});
+			}));
 		});
 		let change = vscode.languages.setTextDocumentLanguage(doc, 'json');
 		await Promise.all([change, close, open]);
 		assert.equal(clock, 2);
 		assert.equal(doc.languageId, 'json');
+		disposables.forEach(disposable => disposable.dispose());
+		disposables.length = 0;
 	});
 
 	test('setTextDocumentLanguage -> error when language does not exist', async function () {
@@ -75,6 +94,31 @@ suite('languages namespace tests', () => {
 		}
 		assert.ok(tuples.length >= 1);
 		assert.ok(found);
+	});
+
+	test('link detector', async function () {
+		const uri = await createRandomFile('class A { // http://a.com }', undefined, '.java');
+		const doc = await vscode.workspace.openTextDocument(uri);
+
+		const target = vscode.Uri.file(isWindows ? 'c:\\foo\\bar' : '/foo/bar');
+		const range = new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 5));
+
+		const linkProvider: vscode.DocumentLinkProvider = {
+			provideDocumentLinks: _doc => {
+				return [new vscode.DocumentLink(range, target)];
+			}
+		};
+		vscode.languages.registerDocumentLinkProvider({ language: 'java', scheme: testFs.scheme }, linkProvider);
+
+		const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>('vscode.executeLinkProvider', doc.uri);
+		assert.equal(2, links && links.length);
+		let [link1, link2] = links!.sort((l1, l2) => l1.range.start.compareTo(l2.range.start));
+
+		assert.equal(target.toString(), link1.target && link1.target.toString());
+		assertEqualRange(range, link1.range);
+
+		assert.equal('http://a.com/', link2.target && link2.target.toString());
+		assertEqualRange(new vscode.Range(new vscode.Position(0, 13), new vscode.Position(0, 25)), link2.range);
 	});
 
 	test('diagnostics & CodeActionProvider', async function () {
@@ -141,7 +185,8 @@ suite('languages namespace tests', () => {
 		await vscode.workspace.openTextDocument(uri);
 		const result = await vscode.commands.executeCommand<vscode.CompletionList>('vscode.executeCompletionItemProvider', uri, new vscode.Position(1, 0));
 		r1.dispose();
-		assert.ok(ran);
-		assert.equal(result!.items[0].label, 'foo');
+		assert.ok(ran, 'Provider has not been invoked');
+		assert.ok(result!.items.some(i => i.label === 'foo'), 'Results do not include "foo"');
 	});
+
 });

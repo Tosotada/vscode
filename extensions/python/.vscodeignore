@@ -1,4 +1,3 @@
 test/**
-src/**
-tsconfig.json
-OSSREADME.json
+cgmanifest.json
+.vscode

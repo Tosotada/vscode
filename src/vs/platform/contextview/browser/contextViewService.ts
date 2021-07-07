@@ -4,36 +4,62 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { IContextViewService, IContextViewDelegate } from './contextView';
-import { ContextView } from 'vs/base/browser/ui/contextview/contextview';
-import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
-import { ILogService } from 'vs/platform/log/common/log';
-import { Disposable } from 'vs/base/common/lifecycle';
+import { ContextView, ContextViewDOMPosition } from 'vs/base/browser/ui/contextview/contextview';
+import { Disposable, IDisposable, toDisposable } from 'vs/base/common/lifecycle';
+import { ILayoutService } from 'vs/platform/layout/browser/layoutService';
 
 export class ContextViewService extends Disposable implements IContextViewService {
-	_serviceBrand: any;
+	declare readonly _serviceBrand: undefined;
 
+	private currentViewDisposable: IDisposable = Disposable.None;
 	private contextView: ContextView;
+	private container: HTMLElement;
 
 	constructor(
-		container: HTMLElement,
-		@ITelemetryService telemetryService: ITelemetryService,
-		@ILogService private logService: ILogService
+		@ILayoutService readonly layoutService: ILayoutService
 	) {
 		super();
 
-		this.contextView = this._register(new ContextView(container));
+		this.container = layoutService.container;
+		this.contextView = this._register(new ContextView(this.container, ContextViewDOMPosition.ABSOLUTE));
+		this.layout();
+
+		this._register(layoutService.onLayout(() => this.layout()));
 	}
 
 	// ContextView
 
-	setContainer(container: HTMLElement): void {
-		this.logService.trace('ContextViewService#setContainer');
-		this.contextView.setContainer(container);
+	setContainer(container: HTMLElement, domPosition?: ContextViewDOMPosition): void {
+		this.contextView.setContainer(container, domPosition || ContextViewDOMPosition.ABSOLUTE);
 	}
 
-	showContextView(delegate: IContextViewDelegate): void {
-		this.logService.trace('ContextViewService#showContextView');
+	showContextView(delegate: IContextViewDelegate, container?: HTMLElement, shadowRoot?: boolean): IDisposable {
+		if (container) {
+			if (container !== this.container) {
+				this.container = container;
+				this.setContainer(container, shadowRoot ? ContextViewDOMPosition.FIXED_SHADOW : ContextViewDOMPosition.FIXED);
+			}
+		} else {
+			if (this.container !== this.layoutService.container) {
+				this.container = this.layoutService.container;
+				this.setContainer(this.container, ContextViewDOMPosition.ABSOLUTE);
+			}
+		}
+
 		this.contextView.show(delegate);
+
+		const disposable = toDisposable(() => {
+			if (this.currentViewDisposable === disposable) {
+				this.hideContextView();
+			}
+		});
+
+		this.currentViewDisposable = disposable;
+		return disposable;
+	}
+
+	getContextViewElement(): HTMLElement {
+		return this.contextView.getViewElement();
 	}
 
 	layout(): void {
@@ -41,7 +67,6 @@ export class ContextViewService extends Disposable implements IContextViewServic
 	}
 
 	hideContextView(data?: any): void {
-		this.logService.trace('ContextViewService#hideContextView');
 		this.contextView.hide(data);
 	}
 }

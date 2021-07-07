@@ -3,40 +3,26 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { fuzzyScore, fuzzyScoreGracefulAggressive, anyScore, FuzzyScorer } from 'vs/base/common/filters';
-import { isDisposable } from 'vs/base/common/lifecycle';
-import { CompletionList, CompletionItemProvider, CompletionItemKind } from 'vs/editor/common/modes';
-import { ISuggestionItem, ensureLowerCaseVariants } from './suggest';
-import { InternalSuggestOptions, EDITOR_DEFAULTS } from 'vs/editor/common/config/editorOptions';
+import { fuzzyScore, fuzzyScoreGracefulAggressive, FuzzyScorer, FuzzyScore, anyScore } from 'vs/base/common/filters';
+import { CompletionItemProvider, CompletionItemKind } from 'vs/editor/common/modes';
+import { CompletionItem } from './suggest';
+import { InternalSuggestOptions } from 'vs/editor/common/config/editorOptions';
 import { WordDistance } from 'vs/editor/contrib/suggest/wordDistance';
 import { CharCode } from 'vs/base/common/charCode';
+import { compareIgnoreCase } from 'vs/base/common/strings';
+import { quickSelect } from 'vs/base/common/arrays';
 
-export interface ICompletionItem extends ISuggestionItem {
-	matches?: number[];
-	score?: number;
-	idx?: number;
-	distance?: number;
-	word?: string;
-}
+type StrictCompletionItem = Required<CompletionItem>;
 
-/* __GDPR__FRAGMENT__
-	"ICompletionStats" : {
-		"suggestionCount" : { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true },
-		"snippetCount": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true },
-		"textCount": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true }
-	}
-*/
-// __GDPR__TODO__: This is a dynamically extensible structure which can not be declared statically.
 export interface ICompletionStats {
-	suggestionCount: number;
-	snippetCount: number;
-	textCount: number;
-	[name: string]: any;
+	pLabelLen: number;
 }
 
 export class LineContext {
-	leadingLineContent: string;
-	characterCountDelta: number;
+	constructor(
+		readonly leadingLineContent: string,
+		readonly characterCountDelta: number,
+	) { }
 }
 
 const enum Refilter {
@@ -45,9 +31,12 @@ const enum Refilter {
 	Incr = 2
 }
 
+/**
+ * Sorted, filtered completion view model
+ * */
 export class CompletionModel {
 
-	private readonly _items: ICompletionItem[];
+	private readonly _items: CompletionItem[];
 	private readonly _column: number;
 	private readonly _wordDistance: WordDistance;
 	private readonly _options: InternalSuggestOptions;
@@ -55,16 +44,18 @@ export class CompletionModel {
 
 	private _lineContext: LineContext;
 	private _refilterKind: Refilter;
-	private _filteredItems: ICompletionItem[];
-	private _isIncomplete: Set<CompletionItemProvider>;
-	private _stats: ICompletionStats;
+	private _filteredItems?: StrictCompletionItem[];
+	private _providerInfo?: Map<CompletionItemProvider, boolean>;
+	private _stats?: ICompletionStats;
 
 	constructor(
-		items: ISuggestionItem[],
+		items: CompletionItem[],
 		column: number,
 		lineContext: LineContext,
 		wordDistance: WordDistance,
-		options: InternalSuggestOptions = EDITOR_DEFAULTS.contribInfo.suggest
+		options: InternalSuggestOptions,
+		snippetSuggestions: 'top' | 'bottom' | 'inline' | 'none',
+		readonly clipboardText: string | undefined
 	) {
 		this._items = items;
 		this._column = column;
@@ -73,22 +64,10 @@ export class CompletionModel {
 		this._refilterKind = Refilter.All;
 		this._lineContext = lineContext;
 
-		if (options.snippets === 'top') {
+		if (snippetSuggestions === 'top') {
 			this._snippetCompareFn = CompletionModel._compareCompletionItemsSnippetsUp;
-		} else if (options.snippets === 'bottom') {
+		} else if (snippetSuggestions === 'bottom') {
 			this._snippetCompareFn = CompletionModel._compareCompletionItemsSnippetsDown;
-		}
-	}
-
-	dispose(): void {
-		const seen = new Set<CompletionList>();
-		for (const { container } of this._items) {
-			if (!seen.has(container)) {
-				seen.add(container);
-				if (isDisposable(container)) {
-					container.dispose();
-				}
-			}
 		}
 	}
 
@@ -105,20 +84,31 @@ export class CompletionModel {
 		}
 	}
 
-	get items(): ICompletionItem[] {
+	get items(): CompletionItem[] {
 		this._ensureCachedState();
-		return this._filteredItems;
+		return this._filteredItems!;
+	}
+
+	get allProvider(): IterableIterator<CompletionItemProvider> {
+		this._ensureCachedState();
+		return this._providerInfo!.keys();
 	}
 
 	get incomplete(): Set<CompletionItemProvider> {
 		this._ensureCachedState();
-		return this._isIncomplete;
+		const result = new Set<CompletionItemProvider>();
+		for (let [provider, incomplete] of this._providerInfo!) {
+			if (incomplete) {
+				result.add(provider);
+			}
+		}
+		return result;
 	}
 
-	adopt(except: Set<CompletionItemProvider>): ISuggestionItem[] {
-		let res = new Array<ISuggestionItem>();
+	adopt(except: Set<CompletionItemProvider>): CompletionItem[] {
+		let res: CompletionItem[] = [];
 		for (let i = 0; i < this._items.length;) {
-			if (!except.has(this._items[i].support)) {
+			if (!except.has(this._items[i].provider)) {
 				res.push(this._items[i]);
 
 				// unordered removed
@@ -135,7 +125,7 @@ export class CompletionModel {
 
 	get stats(): ICompletionStats {
 		this._ensureCachedState();
-		return this._stats;
+		return this._stats!;
 	}
 
 	private _ensureCachedState(): void {
@@ -146,16 +136,17 @@ export class CompletionModel {
 
 	private _createCachedState(): void {
 
-		this._isIncomplete = new Set();
-		this._stats = { suggestionCount: 0, snippetCount: 0, textCount: 0 };
+		this._providerInfo = new Map();
+
+		const labelLengths: number[] = [];
 
 		const { leadingLineContent, characterCountDelta } = this._lineContext;
 		let word = '';
 		let wordLow = '';
 
 		// incrementally filter less
-		const source = this._refilterKind === Refilter.All ? this._items : this._filteredItems;
-		const target: typeof source = [];
+		const source = this._refilterKind === Refilter.All ? this._items : this._filteredItems!;
+		const target: StrictCompletionItem[] = [];
 
 		// picks a score function based on the number of
 		// items that we have to score/filter and based on the
@@ -165,26 +156,25 @@ export class CompletionModel {
 		for (let i = 0; i < source.length; i++) {
 
 			const item = source[i];
-			const { suggestion, container } = item;
 
-			// make sure _labelLow, _filterTextLow, _sortTextLow exist
-			ensureLowerCaseVariants(suggestion);
-
-			// collect those supports that signaled having
-			// an incomplete result
-			if (container.incomplete) {
-				this._isIncomplete.add(item.support);
+			if (item.isInvalid) {
+				continue; // SKIP invalid items
 			}
+
+			// collect all support, know if their result is incomplete
+			this._providerInfo.set(item.provider, Boolean(item.container.incomplete));
 
 			// 'word' is that remainder of the current line that we
 			// filter and score against. In theory each suggestion uses a
 			// different word, but in practice not - that's why we cache
-			const overwriteBefore = item.position.column - suggestion.range.startColumn;
+			const overwriteBefore = item.position.column - item.editStart.column;
 			const wordLen = overwriteBefore + characterCountDelta - (item.position.column - this._column);
 			if (word.length !== wordLen) {
 				word = wordLen === 0 ? '' : leadingLineContent.slice(-wordLen);
 				wordLow = word.toLowerCase();
 			}
+
+			const textLabel = typeof item.completion.label === 'string' ? item.completion.label : item.completion.label.name;
 
 			// remember the word against which this item was
 			// scored
@@ -196,8 +186,7 @@ export class CompletionModel {
 				// the fallback-sort using the initial sort order.
 				// use a score of `-100` because that is out of the
 				// bound of values `fuzzyScore` will return
-				item.score = -100;
-				item.matches = undefined;
+				item.score = FuzzyScore.Default;
 
 			} else {
 				// skip word characters that are whitespace until
@@ -215,53 +204,58 @@ export class CompletionModel {
 				if (wordPos >= wordLen) {
 					// the wordPos at which scoring starts is the whole word
 					// and therefore the same rules as not having a word apply
-					item.score = -100;
-					item.matches = [];
+					item.score = FuzzyScore.Default;
 
-				} else if (typeof suggestion.filterText === 'string') {
+				} else if (typeof item.completion.filterText === 'string') {
 					// when there is a `filterText` it must match the `word`.
 					// if it matches we check with the label to compute highlights
 					// and if that doesn't yield a result we have no highlights,
 					// despite having the match
-					let match = scoreFn(word, wordLow, wordPos, suggestion.filterText, suggestion._filterTextLow, 0, false);
+					let match = scoreFn(word, wordLow, wordPos, item.completion.filterText, item.filterTextLow!, 0, false);
 					if (!match) {
-						continue;
+						continue; // NO match
 					}
-					item.score = match[0];
-					item.matches = (fuzzyScore(word, wordLow, 0, suggestion.label, suggestion._labelLow, 0, true) || anyScore(word, suggestion.label))[1];
+					if (compareIgnoreCase(item.completion.filterText, textLabel) === 0) {
+						// filterText and label are actually the same -> use good highlights
+						item.score = match;
+					} else {
+						// re-run the scorer on the label in the hope of a result BUT use the rank
+						// of the filterText-match
+						item.score = anyScore(word, wordLow, wordPos, textLabel, item.labelLow, 0);
+						item.score[0] = match[0]; // use score from filterText
+					}
 
 				} else {
 					// by default match `word` against the `label`
-					let match = scoreFn(word, wordLow, wordPos, suggestion.label, suggestion._labelLow, 0, false);
-					if (match) {
-						item.score = match[0];
-						item.matches = match[1];
-					} else {
-						continue;
+					let match = scoreFn(word, wordLow, wordPos, textLabel, item.labelLow, 0, false);
+					if (!match) {
+						continue; // NO match
 					}
+					item.score = match;
 				}
 			}
 
 			item.idx = i;
-			item.distance = this._wordDistance.distance(item.position, suggestion);
-			target.push(item);
+			item.distance = this._wordDistance.distance(item.position, item.completion);
+			target.push(item as StrictCompletionItem);
 
 			// update stats
-			this._stats.suggestionCount++;
-			switch (suggestion.kind) {
-				case CompletionItemKind.Snippet: this._stats.snippetCount++; break;
-				case CompletionItemKind.Text: this._stats.textCount++; break;
-			}
+			labelLengths.push(textLabel.length);
 		}
 
 		this._filteredItems = target.sort(this._snippetCompareFn);
 		this._refilterKind = Refilter.Nothing;
+		this._stats = {
+			pLabelLen: labelLengths.length ?
+				quickSelect(labelLengths.length - .85, labelLengths, (a, b) => a - b)
+				: 0
+		};
 	}
 
-	private static _compareCompletionItems(a: ICompletionItem, b: ICompletionItem): number {
-		if (a.score > b.score) {
+	private static _compareCompletionItems(a: StrictCompletionItem, b: StrictCompletionItem): number {
+		if (a.score[0] > b.score[0]) {
 			return -1;
-		} else if (a.score < b.score) {
+		} else if (a.score[0] < b.score[0]) {
 			return 1;
 		} else if (a.distance < b.distance) {
 			return -1;
@@ -276,22 +270,22 @@ export class CompletionModel {
 		}
 	}
 
-	private static _compareCompletionItemsSnippetsDown(a: ICompletionItem, b: ICompletionItem): number {
-		if (a.suggestion.kind !== b.suggestion.kind) {
-			if (a.suggestion.kind === CompletionItemKind.Snippet) {
+	private static _compareCompletionItemsSnippetsDown(a: StrictCompletionItem, b: StrictCompletionItem): number {
+		if (a.completion.kind !== b.completion.kind) {
+			if (a.completion.kind === CompletionItemKind.Snippet) {
 				return 1;
-			} else if (b.suggestion.kind === CompletionItemKind.Snippet) {
+			} else if (b.completion.kind === CompletionItemKind.Snippet) {
 				return -1;
 			}
 		}
 		return CompletionModel._compareCompletionItems(a, b);
 	}
 
-	private static _compareCompletionItemsSnippetsUp(a: ICompletionItem, b: ICompletionItem): number {
-		if (a.suggestion.kind !== b.suggestion.kind) {
-			if (a.suggestion.kind === CompletionItemKind.Snippet) {
+	private static _compareCompletionItemsSnippetsUp(a: StrictCompletionItem, b: StrictCompletionItem): number {
+		if (a.completion.kind !== b.completion.kind) {
+			if (a.completion.kind === CompletionItemKind.Snippet) {
 				return -1;
-			} else if (b.suggestion.kind === CompletionItemKind.Snippet) {
+			} else if (b.completion.kind === CompletionItemKind.Snippet) {
 				return 1;
 			}
 		}

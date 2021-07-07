@@ -2,4 +2,5 @@ build/**
 src/**
 test/**
 tsconfig.json
-OSSREADME.json
+cgmanifest.json
+syntaxes/Readme.md

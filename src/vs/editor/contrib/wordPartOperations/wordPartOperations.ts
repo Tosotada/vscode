@@ -4,17 +4,16 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { KeyCode, KeyMod } from 'vs/base/common/keyCodes';
-import { ITextModel } from 'vs/editor/common/model';
-import { EditorContextKeys } from 'vs/editor/common/editorContextKeys';
-import { Selection } from 'vs/editor/common/core/selection';
 import { registerEditorCommand } from 'vs/editor/browser/editorExtensions';
-import { Range } from 'vs/editor/common/core/range';
-import { WordNavigationType, WordPartOperations } from 'vs/editor/common/controller/cursorWordOperations';
+import { DeleteWordContext, WordNavigationType, WordPartOperations } from 'vs/editor/common/controller/cursorWordOperations';
 import { WordCharacterClassifier } from 'vs/editor/common/controller/wordCharacterClassifier';
-import { DeleteWordCommand, MoveWordCommand } from '../wordOperations/wordOperations';
 import { Position } from 'vs/editor/common/core/position';
-import { KeybindingWeight } from 'vs/platform/keybinding/common/keybindingsRegistry';
+import { Range } from 'vs/editor/common/core/range';
+import { EditorContextKeys } from 'vs/editor/common/editorContextKeys';
+import { ITextModel } from 'vs/editor/common/model';
+import { DeleteWordCommand, MoveWordCommand } from 'vs/editor/contrib/wordOperations/wordOperations';
 import { CommandsRegistry } from 'vs/platform/commands/common/commands';
+import { KeybindingWeight } from 'vs/platform/keybinding/common/keybindingsRegistry';
 
 export class DeleteWordPartLeft extends DeleteWordCommand {
 	constructor() {
@@ -32,8 +31,8 @@ export class DeleteWordPartLeft extends DeleteWordCommand {
 		});
 	}
 
-	protected _delete(wordSeparators: WordCharacterClassifier, model: ITextModel, selection: Selection, whitespaceHeuristics: boolean, wordNavigationType: WordNavigationType): Range {
-		let r = WordPartOperations.deleteWordPartLeft(wordSeparators, model, selection, whitespaceHeuristics);
+	protected _delete(ctx: DeleteWordContext, wordNavigationType: WordNavigationType): Range {
+		let r = WordPartOperations.deleteWordPartLeft(ctx);
 		if (r) {
 			return r;
 		}
@@ -57,13 +56,13 @@ export class DeleteWordPartRight extends DeleteWordCommand {
 		});
 	}
 
-	protected _delete(wordSeparators: WordCharacterClassifier, model: ITextModel, selection: Selection, whitespaceHeuristics: boolean, wordNavigationType: WordNavigationType): Range {
-		let r = WordPartOperations.deleteWordPartRight(wordSeparators, model, selection, whitespaceHeuristics);
+	protected _delete(ctx: DeleteWordContext, wordNavigationType: WordNavigationType): Range {
+		let r = WordPartOperations.deleteWordPartRight(ctx);
 		if (r) {
 			return r;
 		}
-		const lineCount = model.getLineCount();
-		const maxColumn = model.getLineMaxColumn(lineCount);
+		const lineCount = ctx.model.getLineCount();
+		const maxColumn = ctx.model.getLineMaxColumn(lineCount);
 		return new Range(lineCount, maxColumn, lineCount, maxColumn);
 	}
 }
@@ -79,7 +78,7 @@ export class CursorWordPartLeft extends WordPartLeftCommand {
 			inSelectionMode: false,
 			wordNavigationType: WordNavigationType.WordStart,
 			id: 'cursorWordPartLeft',
-			precondition: null,
+			precondition: undefined,
 			kbOpts: {
 				kbExpr: EditorContextKeys.textInputFocus,
 				primary: 0,
@@ -98,7 +97,7 @@ export class CursorWordPartLeftSelect extends WordPartLeftCommand {
 			inSelectionMode: true,
 			wordNavigationType: WordNavigationType.WordStart,
 			id: 'cursorWordPartLeftSelect',
-			precondition: null,
+			precondition: undefined,
 			kbOpts: {
 				kbExpr: EditorContextKeys.textInputFocus,
 				primary: 0,
@@ -122,7 +121,7 @@ export class CursorWordPartRight extends WordPartRightCommand {
 			inSelectionMode: false,
 			wordNavigationType: WordNavigationType.WordEnd,
 			id: 'cursorWordPartRight',
-			precondition: null,
+			precondition: undefined,
 			kbOpts: {
 				kbExpr: EditorContextKeys.textInputFocus,
 				primary: 0,
@@ -138,7 +137,7 @@ export class CursorWordPartRightSelect extends WordPartRightCommand {
 			inSelectionMode: true,
 			wordNavigationType: WordNavigationType.WordEnd,
 			id: 'cursorWordPartRightSelect',
-			precondition: null,
+			precondition: undefined,
 			kbOpts: {
 				kbExpr: EditorContextKeys.textInputFocus,
 				primary: 0,

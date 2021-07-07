@@ -9,14 +9,21 @@ import { LinkedList } from 'vs/base/common/linkedList';
 suite('LinkedList', function () {
 
 	function assertElements<E>(list: LinkedList<E>, ...elements: E[]) {
-		// first: assert toArray
-		assert.deepEqual(list.toArray(), elements);
 
-		// second: assert iterator
-		for (let iter = list.iterator(), element = iter.next(); !element.done; element = iter.next()) {
-			assert.equal(elements.shift(), element.value);
+		// check size
+		assert.strictEqual(list.size, elements.length);
+
+		// assert toArray
+		assert.deepStrictEqual(Array.from(list), elements);
+
+		// assert Symbol.iterator (1)
+		assert.deepStrictEqual([...list], elements);
+
+		// assert Symbol.iterator (2)
+		for (const item of list) {
+			assert.strictEqual(item, elements.shift());
 		}
-		assert.equal(elements.length, 0);
+		assert.strictEqual(elements.length, 0);
 	}
 
 	test('Push/Iter', () => {
@@ -48,6 +55,14 @@ suite('LinkedList', function () {
 		disp = list.push(2);
 		disp();
 		assertElements(list, 0, 1);
+
+		list = new LinkedList<number>();
+		list.push(0);
+		list.push(1);
+		disp = list.push(2);
+		disp();
+		disp();
+		assertElements(list, 0, 1);
 	});
 
 	test('Push/toArray', () => {
@@ -57,15 +72,7 @@ suite('LinkedList', function () {
 		list.push('far');
 		list.push('boo');
 
-		assert.deepEqual(
-			list.toArray(),
-			[
-				'foo',
-				'bar',
-				'far',
-				'boo',
-			]
-		);
+		assertElements(list, 'foo', 'bar', 'far', 'boo');
 	});
 
 	test('unshift/Iter', () => {
@@ -105,15 +112,25 @@ suite('LinkedList', function () {
 		list.unshift('bar');
 		list.unshift('far');
 		list.unshift('boo');
+		assertElements(list, 'boo', 'far', 'bar', 'foo');
+	});
 
-		assert.deepEqual(
-			list.toArray(),
-			[
-				'boo',
-				'far',
-				'bar',
-				'foo',
-			]
-		);
+	test('pop/unshift', function () {
+		let list = new LinkedList<string>();
+		list.push('a');
+		list.push('b');
+
+		assertElements(list, 'a', 'b');
+
+		let a = list.shift();
+		assert.strictEqual(a, 'a');
+		assertElements(list, 'b');
+
+		list.unshift('a');
+		assertElements(list, 'a', 'b');
+
+		let b = list.pop();
+		assert.strictEqual(b, 'b');
+		assertElements(list, 'a');
 	});
 });
